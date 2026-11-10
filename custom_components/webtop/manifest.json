@@ -1,0 +1,14 @@
+{
+  "domain": "webtop",
+  "name": "Webtop (SmartSchool)",
+  "codeowners": ["@iddo"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/iddo/ha-webtop",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/iddo/ha-webtop/issues",
+  "loggers": ["webtop"],
+  "requirements": ["pywebtop==0.0.2"],
+  "version": "0.1.0"
+}

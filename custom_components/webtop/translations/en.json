@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Webtop",
+        "description": "Sign in with the same username and password you use at webtop.smartschool.co.il. A parent login sees every linked child.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "data": "Login data token"
+        },
+        "data_description": {
+          "data": "The opaque 'Data' value the Webtop web client sends on login. Leave the default unless logins fail."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Webtop rejected the credentials",
+        "description": "Enter the current password for {username}.",
+        "data": {
+          "password": "Password",
+          "data": "Login data token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the Webtop server. Check the connection and try again.",
+      "invalid_auth": "Webtop rejected the username or password. If the portal shows a captcha on login, password logins may be blocked for this school.",
+      "unknown": "Unexpected error; see the Home Assistant log."
+    },
+    "abort": {
+      "already_configured": "This Webtop account is already configured.",
+      "reauth_successful": "Credentials updated.",
+      "wrong_account": "Those credentials belong to a different Webtop account."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Webtop options",
+        "data": {
+          "scan_interval": "Polling interval"
+        },
+        "data_description": {
+          "scan_interval": "Minutes between polls of the Webtop portal."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "homework_today": { "name": "Homework today" },
+      "behaviour_events": { "name": "Behaviour events" },
+      "lessons_today": { "name": "Lessons today" },
+      "class": { "name": "Class" },
+      "unread_messages": { "name": "Unread messages" },
+      "last_message": { "name": "Last message" },
+      "unread_notifications": { "name": "Unread notifications" }
+    }
+  }
+}
