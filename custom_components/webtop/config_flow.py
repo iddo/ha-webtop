@@ -27,6 +27,7 @@ from webtop import WebtopLoginError
 from .auth import async_create_client, login_failure_reason
 from .const import (
     CONF_DATA,
+    CONF_LESSON_TIMES,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
@@ -36,6 +37,7 @@ from .const import (
     MIN_SCAN_INTERVAL,
 )
 from .coordinator import WebtopConfigEntry
+from .models import parse_manual_bell
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,17 +155,25 @@ class WebtopConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class WebtopOptionsFlow(OptionsFlowWithReload):
-    """Options: polling interval."""
+    """Options: polling interval and, for schools that publish none, lesson times."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            user_input[CONF_LESSON_TIMES] = (user_input.get(CONF_LESSON_TIMES) or "").strip()
+            try:
+                parse_manual_bell(user_input[CONF_LESSON_TIMES])
+            except ValueError:
+                errors[CONF_LESSON_TIMES] = "invalid_lesson_times"
+            else:
+                return self.async_create_entry(data=user_input)
 
+        options = self.config_entry.options
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_SCAN_INTERVAL,
-                    default=self.config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+                    default=options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
                 ): NumberSelector(
                     NumberSelectorConfig(
                         min=MIN_SCAN_INTERVAL,
@@ -173,6 +183,14 @@ class WebtopOptionsFlow(OptionsFlowWithReload):
                         unit_of_measurement="min",
                     )
                 ),
+                vol.Optional(CONF_LESSON_TIMES): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+                ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        suggested = user_input or {CONF_LESSON_TIMES: options.get(CONF_LESSON_TIMES, "")}
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(schema, suggested),
+            errors=errors,
+        )

@@ -40,12 +40,17 @@
       "init": {
         "title": "Webtop options",
         "data": {
-          "scan_interval": "Polling interval"
+          "scan_interval": "Polling interval",
+          "lesson_times": "Lesson times"
         },
         "data_description": {
-          "scan_interval": "Minutes between polls of the Webtop portal."
+          "scan_interval": "Minutes between polls of the Webtop portal.",
+          "lesson_times": "Only needed when the Current lesson sensor shows unknown because the school publishes no lesson times. List them in lesson order, for example: 08:00-08:45, 08:45-09:30, 09:50-10:35. Prefix a lesson number to skip ahead: 0=07:15-08:00. Leave empty to use the portal's times."
         }
       }
+    },
+    "error": {
+      "invalid_lesson_times": "Could not read the lesson times. Use the form 08:00-08:45, 08:45-09:30, with each lesson ending after it starts."
     }
   },
   "entity": {

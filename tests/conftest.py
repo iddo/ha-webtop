@@ -14,133 +14,279 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from webtop import WebtopLoginError, WebtopRequestError, WebtopSession
 
 from custom_components.webtop.const import CONF_DATA, CONF_PASSWORD, CONF_USERNAME, DEFAULT_DATA, DOMAIN
+from custom_components.webtop.models import Student
 
 ENCRYPTED_ID_A = "enc-student-a=="
 ENCRYPTED_ID_B = "enc-student-b=="
+SCHOOL = "בית ספר לדוגמה"
 
+# Every fixture below mirrors the structure of a real (anonymized) capture; the values are invented.
 LOGIN_DATA = {
     "token": "tok-1",
     "userId": "u-42",
-    "studentId": 1001,
-    "id": ENCRYPTED_ID_A,
+    "id": "enc-parent-login==",
+    "studentId": 0,
     "schoolId": 7,
-    "schoolName": "בית ספר לדוגמה",
+    "schoolName": SCHOOL,
     "firstName": "דנה",
     "lastName": "לוי",
+    "fullName": "דנה לוי",
+    "userType": 2,
+    "isTeacher": 2,
+    "classCode": "0",
+    "classNumber": 0,
     "institutionCode": 440099,
+    "cellphone": "0520000000",
 }
 
 DASHBOARD = {
     "status": True,
     "data": {
         "childrens": [
-            {
-                "id": ENCRYPTED_ID_A,
-                "studentId": 1001,
-                "firstName": "נועם",
-                "lastName": "לוי",
-                "classCode": 3,
-                "classNum": 2,
-                "className": "ג'2",
-                "studyYear": 2026,
-            },
-            {
-                "id": ENCRYPTED_ID_B,
-                "studentId": 1002,
-                "firstName": "מאיה",
-                "lastName": "לוי",
-                "classCode": 6,
-                "classNum": 1,
-                "studyYear": 2026,
-            },
-        ]
+            {"id": ENCRYPTED_ID_A, "firstName": "נועם", "lastName": "לוי", "classCode": 3, "classNum": 2,
+             "cellphone": "0521111111"},
+            {"id": ENCRYPTED_ID_B, "firstName": "מאיה", "lastName": "לוי", "classCode": 6, "classNum": 1,
+             "cellphone": "0522222222"},
+        ],
+        "allowShotefSchedualeDataForToday": True,
+        "allowChangesAndMessagesDataForToday": True,
+        "allowGetHomeWork": True,
+        "allowGetPupilDiciplineEvents": True,
+        "allowGetGrades": True,
+        "isOrt": False,
+        "shortcuts": [],
     },
-}
+    "message": None,
+    "errorId": None,
+    "errorDescription": None,
+    "errorHTML": None,
+}  # fmt: skip
+# The portal gives children no numeric id, so the integration keys them by name and school.
+KEY_A = Student.from_dashboard(DASHBOARD["data"]["childrens"][0], school_name=SCHOOL).key
+KEY_B = Student.from_dashboard(DASHBOARD["data"]["childrens"][1], school_name=SCHOOL).key
 
+
+def _week_lesson(
+    day: int, hour: int, subject: str, teacher: str, homework: str = "", topic: str = ""
+) -> dict[str, Any]:
+    return {
+        "files": [],
+        "subject_name": subject,
+        "subject_level": "",
+        "teacher": teacher,
+        "day_no": day,
+        "hour_no": hour,
+        "hour_name": None,
+        "study_group": 860260,
+        "descClass": topic,
+        "homeWork": homework,
+        "statClass": 1 if topic else 0,
+        "file_name": None,
+    }
+
+
+def _week(lessons_by_date: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """A ``GetPupilLessonsAndHomework`` week: Sunday 8 to Friday 13 November 2026, ten lesson slots a day."""
+    days = []
+    for index, day in enumerate(range(8, 14), 1):
+        date = f"2026-11-{day:02d}"
+        rows = lessons_by_date.get(date, [])
+        days.append(
+            {
+                "date": f"{date}T00:00:00+02:00",
+                "dayIndex": index,
+                "hoursData": [
+                    {"hour": hour, "hourName": None, "scheduale": [r for r in rows if r["hour_no"] == hour]}
+                    for hour in range(1, 11)
+                ],
+            }
+        )
+    return {"status": True, "data": days, "message": None, "errorId": None, "errorDescription": None}
+
+
+# PupilCard/GetPupilLessonsAndHomework for student A: the frozen "today" is Tuesday 10 November.
+LESSONS_WEEK = _week(
+    {
+        "2026-11-09": [_week_lesson(2, 1, "תורה", "שרה", "לקרוא פרק ג", "פרשת השבוע")],
+        "2026-11-10": [
+            _week_lesson(3, 1, "מתמטיקה", "רחל", "עמוד 45 תרגילים 1-5", "שברים"),
+            _week_lesson(3, 2, "אנגלית", "דוד", "אין", "Unit 3"),
+        ],
+        "2026-11-11": [_week_lesson(4, 1, "מדעים", "יעל")],
+    }
+)
+LESSONS_WEEK_EMPTY = _week({})
+
+# PupilCard/GetPupilScheduale: the standing timetable, keyed by weekday, no dates.
+TIMETABLE = {
+    "status": True,
+    "data": [
+        {
+            "dayIndex": day,
+            "hoursData": [
+                {
+                    "hour": hour,
+                    "hourName": None,
+                    "scheduale": (
+                        [{"day": day, "hour": hour, "subject": subject, "subjectLevel": "",
+                          "teacherLastName": "כהן", "teacherPrivateName": "רחל", "room": None}]
+                        if (day, hour) in {(3, 1), (3, 2), (4, 1)}
+                        else []
+                    ),
+                }
+                for hour, subject in ((1, "מתמטיקה"), (2, "אנגלית"), (3, "חינוך גופני"))
+            ],
+        }
+        for day in range(1, 7)
+    ],
+}  # fmt: skip
+
+# dashboard/GetHomeWork: today only, no dates. Used when the dated week is unavailable.
 HOMEWORK_A = {
     "status": True,
     "data": {
+        "allowToViewThis": True,
         "dataTable": [
-            {
-                "lesson": "מתמטיקה",
-                "teacher": "רחל",
-                "homeworkData": "עמוד 45 תרגילים 1-5",
-                "hourNum": "1",
-                "status": "Open",
-            },
+            {"lesson": "מתמטיקה", "teacher": "רחל", "homeworkData": "עמוד 45 תרגילים 1-5", "hourNum": "1",
+             "status": "Open"},
             {"lesson": "אנגלית", "teacher": "דוד", "homeworkData": "אין", "hourNum": "2"},
             {"lesson": "מדעים", "teacher": "יעל", "homeworkData": "", "hourNum": "3"},
-        ]
+        ],
     },
-}
-HOMEWORK_B = {"status": True, "data": {"dataTable": []}}
+}  # fmt: skip
+HOMEWORK_B = {"status": True, "data": {"allowToViewThis": True, "dataTable": []}}
 
-DISCIPLINE = {
-    "status": True,
-    "data": [
-        {
-            "eventDate": "2026-11-09T09:00:00",
-            "eventName": "איחור",
-            "subjectName": "חשבון",
-            "teacherName": "רחל",
-            "remark": "",
-        },
-    ],
-}
 
-SCHEDULE = {
+def _behaviour(
+    event_id: int, kind: str, date: str, subject: str, hour: int, remark: str | None = None
+) -> dict[str, Any]:
+    return {
+        "eventID": event_id,
+        "eventType": kind,
+        "eventCode": 244493,
+        "eventDate": f"{date}T00:00:00",
+        "isJustified": False,
+        "justifiedReason": None,
+        "subjectName": subject,
+        "subjectCode": 4,
+        "teacherName": "רחל כהן",
+        "hourNum": hour,
+        "hourName": "",
+        "remark": remark,
+        "studyGroupID": 721677,
+        "lessonNums": 0,
+    }
+
+
+_BEHAVIOUR_ROWS = [
+    _behaviour(1, "ציון לשבח", "2026-09-01", "תורה", 1),
+    _behaviour(2, "איחור", "2026-11-09", "חשבון", 1, "איחר בעשר דקות"),
+    _behaviour(3, "הפרעה", "2026-11-10", "מדעים", 5, "דיבר בשיעור"),
+    _behaviour(4, "ציון לשבח", "2026-11-10", "אנגלית", 2),
+]
+_BEHAVIOUR_COMMON = {
+    "viewRemarkForParentPupil": True,
+    "canRequestJustification": False,
+    "behaviorGrade": None,
+    "hours": None,
+    "eventsTypes": None,
+    "groups": None,
+}
+# PupilCard/GetPupilDiciplineEvents: the whole year.
+DISCIPLINE = {"status": True, "data": {**_BEHAVIOUR_COMMON, "diciplineEvents": _BEHAVIOUR_ROWS}}
+# dashboard/GetPupilDiciplineEvents: the latest few, nested one level deeper.
+DISCIPLINE_DASHBOARD = {
     "status": True,
-    "data": [
-        {
-            "date": "2026-11-10T00:00:00",
-            "hoursData": [
-                {"hourNum": 1, "scheduale": [{"subject_name": "מתמטיקה", "teacher": "רחל"}]},
-                {"hourNum": 2, "scheduale": [{"subject_name": "אנגלית", "teacher": "דוד", "isChanged": 1}]},
-            ],
-        },
-        {
-            "date": "2026-11-11T00:00:00",
-            "hoursData": [{"hourNum": 1, "scheduale": [{"subject_name": "מדעים", "teacher": "יעל"}]}],
-        },
-    ],
+    "data": {"allowToViewThis": True, "dataTable": {**_BEHAVIOUR_COMMON, "diciplineEvents": _BEHAVIOUR_ROWS[-2:]}},
 }
 
 INBOX = {
     "status": True,
     "data": [
-        {
-            "subject": "טיול שנתי",
-            "sendingDate": "2026-11-09T13:13:00",
-            "student_F_name": "דוד",
-            "student_L_name": "כהן",
-            "hasRead": 0,
-            "filesWereAttached": 1,
-            "rowNumber": 1,
-        },
-        {
-            "subject": "הודעה ישנה",
-            "sendingDate": "2026-11-01T08:30:00",
-            "student_F_name": "שרה",
-            "student_L_name": "מזרחי",
-            "hasRead": 1,
-            "filesWereAttached": 0,
-            "rowNumber": 2,
-        },
+        {"typeID": 1, "subject": "טיול שנתי", "sendingDate": "2026-11-09T13:13:00", "userTitle": None,
+         "student_F_name": "דוד", "student_L_name": "כהן", "userType": 1, "classCode": "0", "classNumber": 0,
+         "hasRead": 0, "filesWereAttached": 1, "rowNumber": 1, "count": 2, "fromTitle": None,
+         "senderId": "enc-sender-1", "messageId": "enc-message-1", "userImageToken": "img-token"},
+        {"typeID": 1, "subject": "הודעה ישנה", "sendingDate": "2026-11-01T08:30:00", "userTitle": None,
+         "student_F_name": "שרה", "student_L_name": "מזרחי", "userType": 1, "classCode": "0", "classNumber": 0,
+         "hasRead": 1, "filesWereAttached": 0, "rowNumber": 2, "count": 2, "fromTitle": None,
+         "senderId": "enc-sender-2", "messageId": "enc-message-2", "userImageToken": "img-token"},
     ],
+}  # fmt: skip
+
+# Menu/GetPreviewUnreadNotifications
+NOTIFICATIONS = {
+    "status": True,
+    "data": {
+        "personalNotifications": [
+            {"moduleName": "lessonSubjectHomework", "itemId": "enc-item-1", "moduleNavigation": "PupilCard/13/",
+             "notificationType": 0, "id": 0, "date": "2026-11-10T14:05:00", "message": "עודכנו שיעורי בית במתמטיקה",
+             "read_date": None, "extra_data": "a=1", "studentID": ENCRYPTED_ID_A},
+            {"moduleName": "disciplineEvents", "itemId": "enc-item-2", "moduleNavigation": "PupilCard/14/",
+             "notificationType": 0, "id": 0, "date": "2026-11-09T09:00:00", "message": "נרשם אירוע משמעת",
+             "read_date": None, "extra_data": "a=2", "studentID": ENCRYPTED_ID_A},
+        ],
+        "systemMessages": None,
+        "pedegogicalNotification": None,
+    },
+}  # fmt: skip
+
+# Menu/GetMenuCounters
+MENU_COUNTERS = {
+    "status": True,
+    "data": {
+        "unreadMessages": 1,
+        "unreadNotifications": 3,
+        "unreadPedegogicalNotifications": 0,
+        "unreadSystemNotifications": 0,
+        "unreadPersonalNotifications": 3,
+    },
 }
 
-NOTIFICATIONS = {"status": True, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
+# dashboard/WeeklySchedualeForToday: carries the bell schedule one level down. A school that never
+# entered its lesson times answers ":" for each, as in WEEKLY_WITHOUT_TIMES.
+_BELL = [("08:00", "08:45"), ("08:45", "09:30"), ("09:50", "10:35"), ("10:35", "11:20")]
 
-# Shapes follow what the Webtop web client reads from these responses.
+
+def _weekly(times: list[tuple[str, str]]) -> dict[str, Any]:
+    return {
+        "status": True,
+        "data": {
+            "message": None,
+            "data": {
+                "hourSettings": {"schdualerHourNumber": 10, "schdualerStartZero": 1},
+                "events": {
+                    "hours": [
+                        {"hour": hour, "name": None, "fromTime": start, "toTime": end}
+                        for hour, (start, end) in enumerate(times, 1)
+                    ],
+                    "vactionns": [],
+                    "minHour": 1,
+                    "maxHour": 10,
+                    "events": None,
+                },
+                "inactiveDays": [7],
+            },
+            "messageObjects": None,
+        },
+    }
+
+
+WEEKLY = _weekly(_BELL)
+WEEKLY_WITHOUT_TIMES = _weekly([(":", ":")] * 4)
+
+# shotef/EventsTestsBoard. The real capture came from a school that does not use the board
+# (TESTS_BOARD_UNUSED); the populated shape follows what the Webtop web client reads.
+TESTS_BOARD_UNUSED = {
+    "status": True,
+    "data": {"classes": None, "instructorClasses": None, "studyGroups": None, "exams": None, "vactications": None,
+             "events": None, "subjects": None, "examTypes": None, "eventsTypes": None, "hours": None,
+             "inactiveDays": None, "startDate": "0001-01-01T00:00:00"},
+}  # fmt: skip
 TESTS_BOARD = {
     "status": True,
     "data": {
-        "hours": [
-            {"hour": 1, "fromTime": "08:00", "toTime": "08:45"},
-            {"hour": 2, "fromTime": "08:45", "toTime": "09:30"},
-            {"hour": 3, "fromTime": "09:50", "toTime": "10:35"},
-            {"hour": 4, "fromTime": "10:35", "toTime": "11:20"},
-        ],
+        "hours": [{"hour": hour, "fromTime": start, "toTime": end} for hour, (start, end) in enumerate(_BELL, 1)],
         "exams": [
             {"title": "מבחן", "subject": "היסטוריה", "date": "2026-11-18T00:00:00", "fromHour": 2, "toHour": 4,
              "classCode": 3, "classNumber": 2, "note": "פרקים 4-6"},
@@ -162,18 +308,21 @@ TESTS_BOARD = {
     },
 }  # fmt: skip
 
+# dashboard/GetGrades. The capture had an empty dataTable; the row shape follows the web client.
 GRADES = {
     "status": True,
     "data": {
+        "allowToViewThis": True,
         "dataTable": [
             {"subject": "אנגלית", "title": "בוחן אוצר מילים", "type": "בוחן", "date": "2026-10-20T00:00:00",
              "grade": 78, "weight": 5, "teacherLastName": "לוי", "teacherFirstName": "דוד"},
             {"subject": "מדעים", "title": "בוחן פתע", "type": "בוחן", "date": "2026-11-03T00:00:00",
              "grade": 92, "weight": 10, "teacherLastName": "שפירא", "teacherFirstName": "נועה", "remark": "כל הכבוד"},
-        ]
+        ],
     },
 }  # fmt: skip
 
+# dashboard/ChangesAndMessagesDataForToday
 CHANGES = {
     "status": True,
     "data": {
@@ -185,16 +334,25 @@ CHANGES = {
     },
 }
 
-REQUEST_DEFAULTS = {
+
+def _week_for(payload: dict[str, Any]) -> dict[str, Any]:
+    return LESSONS_WEEK if payload.get("studentID") == ENCRYPTED_ID_A else LESSONS_WEEK_EMPTY
+
+
+# Defaults for request(), keyed by the last path segment. A callable picks by request payload.
+REQUEST_DEFAULTS: dict[str, Any] = {
+    "GetPupilLessonsAndHomework": _week_for,
+    "GetPupilDiciplineEvents": DISCIPLINE,
+    "GetMenuCounters": MENU_COUNTERS,
     "EventsTestsBoard": TESTS_BOARD,
+    "WeeklySchedualeForToday": WEEKLY,
     "GetGrades": GRADES,
     "ChangesAndMessagesDataForToday": CHANGES,
     # Used by the capture tool, which calls every endpoint through request().
     "InitDashboard": DASHBOARD,
     "GetHomeWork": HOMEWORK_A,
     "GetMessagesInbox": INBOX,
-    "GetPupilScheduale": SCHEDULE,
-    "GetPupilDiciplineEvents": DISCIPLINE,
+    "GetPupilScheduale": TIMETABLE,
     "GetPreviewUnreadNotifications": NOTIFICATIONS,
     "GetMultipleUsersForUser": {"status": True, "data": []},
     "GetPupilPeriodGrades": {"status": False, "errorDescription": "view is blocked", "data": None},
@@ -304,10 +462,10 @@ class FakeWebtopClient:
         )
 
     async def get_discipline_events(self, *, encrypted_student_id: str, class_code: int) -> Any:
-        return self._answer("get_discipline_events", DISCIPLINE, encrypted_student_id=encrypted_student_id)
+        return self._answer("get_discipline_events", DISCIPLINE_DASHBOARD, encrypted_student_id=encrypted_student_id)
 
     async def get_pupil_schedule(self, **kwargs: Any) -> Any:
-        return self._answer("get_pupil_schedule", SCHEDULE, **kwargs)
+        return self._answer("get_pupil_schedule", TIMETABLE, **kwargs)
 
     async def get_messages_inbox(self, **kwargs: Any) -> Any:
         return self._answer("get_messages_inbox", INBOX, **kwargs)
@@ -318,8 +476,11 @@ class FakeWebtopClient:
     async def request(self, method: str, path: str, **kwargs: Any) -> FakeResponse:
         """Endpoints pywebtop has no method for, keyed by the last path segment."""
         name = path.rsplit("/", 1)[-1]
+        payload = kwargs.get("json") or {}
         default = REQUEST_DEFAULTS.get(name, {"status": True, "data": None})
-        return FakeResponse(self._answer(name, default, path=path, **(kwargs.get("json") or {})))
+        if callable(default):
+            default = default(payload)
+        return FakeResponse(self._answer(name, default, path=path, **payload))
 
 
 @pytest.fixture(autouse=True)

@@ -94,12 +94,23 @@ def is_datetime_string(value: str) -> bool:
 def is_structural_string(value: str) -> bool:
     """Dates, times, short numbers and stock phrases carry no identity on their own."""
     v = value.strip()
-    return not v or v in GENERIC_VALUES or is_datetime_string(v) or bool(_NUMERIC_RE.match(v))
+    stock = " ".join(v.split()).strip(".!:;־- ")
+    if not v or v in GENERIC_VALUES or stock in GENERIC_VALUES:
+        return True
+    return is_datetime_string(v) or bool(_NUMERIC_RE.match(v))
+
+
+# Subjects and titles of messages are written by people, even when a sample looks generic.
+_MESSAGE_DOC_RE = re.compile(r"inbox|messages|notification", re.I)
+_MESSAGE_TEXT_KEYS = frozenset({"subject", "title", "message", "body", "content", "text"})
 
 
 def hard_rule(path: str) -> str | None:
     """Category forced by the key name, or None to let the LLM decide."""
     key = leaf_key(path)
+    document = path.split(".", 1)[0]
+    if key in _MESSAGE_TEXT_KEYS and _MESSAGE_DOC_RE.search(document):
+        return FREE_TEXT
     if _SECRET_RE.search(key):
         return SECRET
     if _CONTACT_RE.search(key):

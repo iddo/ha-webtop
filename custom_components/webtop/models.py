@@ -194,13 +194,33 @@ class Student:
     def class_label(self) -> str:
         if self.class_name:
             return self.class_name
-        if self.class_code is not None and self.class_number is not None:
+        if self.class_code is None or self.class_number is None:
+            return ""
+        letter = GRADE_LETTERS.get(self.class_code)
+        if letter is None:
             return f"{self.class_code}-{self.class_number}"
-        return ""
+        # Single letters take a geresh (ג'1); the two-letter grades already carry gershayim.
+        return f"{letter}'{self.class_number}" if len(letter) == 1 else f"{letter} {self.class_number}"
 
     @property
     def has_class_params(self) -> bool:
         return bool(self.student_id) and self.class_code is not None
+
+
+# Webtop's class code is the grade level: 1 = א ... 12 = י"ב.
+GRADE_LETTERS = {
+    1: "א", 2: "ב", 3: "ג", 4: "ד", 5: "ה", 6: "ו", 7: "ז", 8: "ח", 9: "ט", 10: "י", 11: 'י"א', 12: 'י"ב',
+}  # fmt: skip
+
+
+def view_allowed(data: Any) -> bool:
+    """Dashboard widgets answer ``allowToViewThis: false`` when the school switched them off."""
+    return not (isinstance(data, dict) and data.get("allowToViewThis") is False)
+
+
+def dashboard_allows(dashboard: Any, flag: str) -> bool:
+    """An ``InitDashboard`` permission flag such as ``allowGetGrades``; absent means allowed."""
+    return not (isinstance(dashboard, dict) and dashboard.get(flag) is False)
 
 
 _STUDENT_LIST_KEYS = ("childrens", "children", "students", "Students", "pupils", "Pupils")
@@ -284,11 +304,11 @@ class HomeworkItem:
     date: str = ""
 
     def identity(self) -> str:
-        return _digest(self.subject, self.homework)
+        return _digest(self.subject, self.homework, self.date[:10])
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "date": self.date,
+            "date": self.date[:10],
             "hour": self.hour,
             "subject": self.subject,
             "teacher": self.teacher,
@@ -330,6 +350,23 @@ def parse_homework(data: Any, *, date: str) -> list[HomeworkItem]:
                 date=_pick_text(row, "date", "lessonDate", "dueDate") or date,
             )
         )
+    return items
+
+
+def homework_from_lessons(lessons: list[Any]) -> list[HomeworkItem]:
+    """Homework written on this week's lessons (``GetPupilLessonsAndHomework``)."""
+    items = [
+        HomeworkItem(
+            subject=lesson.subject,
+            homework=lesson.homework,
+            teacher=lesson.teacher,
+            hour=lesson.hour,
+            date=lesson.date,
+        )
+        for lesson in lessons
+        if lesson.date and not is_no_homework(lesson.homework)
+    ]
+    items.sort(key=lambda h: (h.date, h.hour if h.hour is not None else 99))
     return items
 
 
@@ -405,13 +442,18 @@ class DisciplineEvent:
     teacher: str = ""
     remark: str = ""
     justified: bool | None = None
+    hour: int | None = None
+    event_id: str = ""
 
     def identity(self) -> str:
-        return _digest(self.date[:19], self.event, self.subject, self.teacher)
+        if self.event_id:
+            return _digest(self.event_id)
+        return _digest(self.date[:19], self.event, self.subject, self.teacher, str(self.hour))
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "date": self.date,
+            "date": self.date[:10],
+            "hour": self.hour,
             "event": self.event,
             "subject": self.subject,
             "teacher": self.teacher,
@@ -420,7 +462,7 @@ class DisciplineEvent:
         }
 
 
-_EVENT_KEYS = ("eventName", "event", "disciplineEvent", "eventType", "type", "name", "title")
+_EVENT_KEYS = ("eventType", "eventName", "event", "disciplineEvent", "type", "name", "title")
 _DATE_KEYS = ("eventDate", "date", "lessonDate", "Date", "dateTime")
 
 
@@ -429,9 +471,15 @@ def _row_list(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [r for r in data if isinstance(r, dict)]
     if isinstance(data, dict):
-        for key in ("dataTable", "events", "items", "list", "rows"):
-            if isinstance(data.get(key), list):
-                return [r for r in data[key] if isinstance(r, dict)]
+        # "diciplineEvents" is the server's spelling. The dashboard nests it under a dataTable object.
+        for key in ("diciplineEvents", "dataTable", "events", "items", "list", "rows"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [r for r in value if isinstance(r, dict)]
+            if isinstance(value, dict):
+                nested = _row_list(value)
+                if nested:
+                    return nested
         for value in data.values():
             if isinstance(value, list) and value and isinstance(value[0], dict):
                 return [r for r in value if isinstance(r, dict)]
@@ -445,7 +493,7 @@ def parse_discipline(data: Any) -> list[DisciplineEvent]:
         date = _pick_text(row, *_DATE_KEYS)
         if not event and not date:
             continue
-        justified_raw = _pick(row, "justified", "isJustified", "approved")
+        justified_raw = row.get("isJustified", row.get("justified", row.get("approved")))
         events.append(
             DisciplineEvent(
                 date=date,
@@ -454,8 +502,11 @@ def parse_discipline(data: Any) -> list[DisciplineEvent]:
                 teacher=_pick_text(row, "teacher", "teacherName", "Teacher"),
                 remark=_pick_text(row, "remark", "remarks", "comment", "comments", "description", "notes"),
                 justified=None if justified_raw is None else _as_bool(justified_raw),
+                hour=_as_int(_pick(row, "hourNum", "hour")),
+                event_id=_pick_text(row, "eventID", "eventId"),
             )
         )
+    events.sort(key=lambda e: (e.date, e.hour if e.hour is not None else 0), reverse=True)
     return events
 
 
@@ -478,6 +529,8 @@ class Lesson:
     # "HH:MM" when the lesson row carries its own times; otherwise the bell schedule supplies them.
     start: str = ""
     end: str = ""
+    # What the teacher wrote about the lesson (``descClass``), once it has been reported.
+    topic: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -490,23 +543,38 @@ class Lesson:
             "changed": self.changed,
             "start": self.start,
             "end": self.end,
+            "topic": self.topic,
         }
 
 
-_WEEKDAY_KEYS = ("day", "dayIndex", "dayOfWeek", "dayNum", "weekDay")
+_WEEKDAY_KEYS = ("dayIndex", "day", "day_no", "dayOfWeek", "dayNum", "weekDay")
 _START_TIME_KEYS = ("fromTime", "startTime", "from_time", "start_time", "timeFrom")
 _END_TIME_KEYS = ("toTime", "endTime", "to_time", "end_time", "timeTo")
 _SUBJECT_KEYS = ("subject_name", "subjectName", "subject", "lesson", "lessonSubject", "Subject")
-_HOUR_KEYS = ("hourNum", "hour", "hourNumber", "lessonNum", "HourNum")
+_HOUR_KEYS = ("hour", "hour_no", "hourNum", "hourNumber", "lessonNum", "HourNum")
+
+
+def _teacher_of(row: dict[str, Any]) -> str:
+    last = _pick_text(row, "teacherLastName", "teacher_last_name")
+    first = _pick_text(row, "teacherPrivateName", "teacherFirstName", "teacher_private_name")
+    return f"{last} {first}".strip() or _pick_text(row, "teacher", "teacherName", "Teacher")
 
 
 def parse_schedule(data: Any) -> list[Lesson]:
-    """Tolerant walk of a timetable payload.
+    """Walk a timetable payload. Two real shapes, both a list of days:
 
-    The known shape (shared with ``GetPupilLessonsAndHomework``) is
-    ``[{date, hoursData: [{hourNum, scheduale: [{subject_name, teacher, ...}]}]}]``
-    with the server's own spelling of "schedule". Dates and hour numbers sit on
-    ancestors of the lesson dicts, so they are inherited while walking.
+    * ``PupilCard/GetPupilLessonsAndHomework`` - this week, dated::
+
+        [{date, dayIndex, hoursData: [{hour, scheduale: [
+            {subject_name, teacher, hour_no, descClass, homeWork, ...}]}]}]
+
+    * ``PupilCard/GetPupilScheduale`` - the standing timetable, by weekday::
+
+        [{dayIndex, hoursData: [{hour, scheduale: [
+            {day, hour, subject, teacherLastName, teacherPrivateName, room}]}]}]
+
+    ("scheduale" is the server's spelling.) Dates, weekdays and lesson numbers
+    sit on ancestors of the lesson rows, so they are inherited while walking.
     """
     lessons: list[Lesson] = []
 
@@ -526,10 +594,11 @@ def parse_schedule(data: Any) -> list[Lesson]:
                         date=own_date,
                         hour=own_hour,
                         subject=subject,
-                        teacher=_pick_text(node, "teacher", "teacherName", "Teacher"),
-                        room=_pick_text(node, "room", "roomName", "className", "classRoom"),
+                        teacher=_teacher_of(node),
+                        room=_pick_text(node, "room", "roomName", "classRoom"),
                         homework=_pick_text(node, "homeWork", "homework", "homeworkData"),
                         changed=_as_bool(_pick(node, "isChanged", "changed", "hasChange", "isSubstitute")),
+                        topic=_pick_text(node, "descClass", "lessonSubject", "topic"),
                         weekday=own_weekday,
                         start=format_time(_pick(node, *_START_TIME_KEYS)),
                         end=format_time(_pick(node, *_END_TIME_KEYS)),
@@ -549,6 +618,62 @@ def parse_schedule(data: Any) -> list[Lesson]:
 # ---------------------------------------------------------------------------
 # notifications
 # ---------------------------------------------------------------------------
+@dataclass
+class MenuCounters:
+    """``Menu/GetMenuCounters``: the unread badges in the portal's menu."""
+
+    unread_messages: int | None = None
+    unread_notifications: int | None = None
+
+
+def parse_menu_counters(data: Any) -> MenuCounters:
+    if not isinstance(data, dict):
+        return MenuCounters()
+    return MenuCounters(
+        unread_messages=_as_int(data.get("unreadMessages")),
+        unread_notifications=_as_int(data.get("unreadNotifications")),
+    )
+
+
+@dataclass
+class Notification:
+    """One row of ``Menu/GetPreviewUnreadNotifications``."""
+
+    date: str
+    message: str
+    module: str = ""
+    kind: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"date": self.date, "message": self.message, "module": self.module, "kind": self.kind}
+
+
+_NOTIFICATION_LISTS = (
+    ("personalNotifications", "personal"),
+    ("pedegogicalNotification", "pedagogical"),
+    ("systemMessages", "system"),
+)
+
+
+def parse_notifications(data: Any) -> list[Notification]:
+    """Newest first."""
+    if not isinstance(data, dict):
+        return []
+    found = [
+        Notification(
+            date=_pick_text(row, "date", "sendingDate"),
+            message=_pick_text(row, "message", "text", "title"),
+            module=_pick_text(row, "moduleName"),
+            kind=kind,
+        )
+        for key, kind in _NOTIFICATION_LISTS
+        for row in (data.get(key) or [])
+        if isinstance(row, dict)
+    ]
+    found.sort(key=lambda n: n.date, reverse=True)
+    return found
+
+
 def parse_unread_count(data: Any) -> int | None:
     """Count the unread notifications in a ``GetPreviewUnreadNotifications`` payload."""
     if isinstance(data, list):
@@ -560,6 +685,8 @@ def parse_unread_count(data: Any) -> int | None:
         for key in ("notifications", "items", "list", "dataTable"):
             if isinstance(data.get(key), list):
                 return len(data[key])
+        if any(key in data for key, _ in _NOTIFICATION_LISTS):
+            return len(parse_notifications(data))
         return None
     if isinstance(data, (int, float)) and not isinstance(data, bool):
         return int(data)
@@ -573,19 +700,16 @@ def parse_unread_count(data: Any) -> int | None:
 BellSchedule = dict[int, tuple[dt.time, dt.time]]
 
 
-def parse_bell_schedule(data: Any) -> BellSchedule:
-    """Find ``[{hour, fromTime, toTime}]`` anywhere near the top of a payload."""
-    candidates: list[Any] = []
-    if isinstance(data, dict):
-        candidates = [data.get(k) for k in ("hours", "hoursList", "hourSettings", "allHours")]
-        candidates += [v for v in data.values() if isinstance(v, list)]
-    elif isinstance(data, list):
-        candidates = [data]
-    for rows in candidates:
-        if not isinstance(rows, list):
-            continue
+def parse_bell_schedule(data: Any, _depth: int = 0) -> BellSchedule:
+    """Find a ``hours: [{hour, fromTime, toTime}]`` list within a payload.
+
+    It sits at ``data.hours`` on the tests board and at ``data.data.events.hours``
+    on the weekly schedule. A school that never entered its lesson times
+    answers ``":"`` for each, which yields an empty schedule.
+    """
+    if isinstance(data, list):
         bell: BellSchedule = {}
-        for row in rows:
+        for row in data:
             if not isinstance(row, dict):
                 continue
             hour = _as_int(_pick(row, *_HOUR_KEYS))
@@ -593,9 +717,54 @@ def parse_bell_schedule(data: Any) -> BellSchedule:
             end = parse_time(_pick(row, *_END_TIME_KEYS))
             if hour is not None and start and end and start < end:
                 bell[hour] = (start, end)
-        if bell:
-            return bell
+        return bell
+    if not isinstance(data, dict) or _depth > 3:
+        return {}
+    for key in ("hours", "hoursList", "allHours"):
+        found = parse_bell_schedule(data[key], _depth + 1) if isinstance(data.get(key), list) else {}
+        if found:
+            return found
+    for value in data.values():
+        if isinstance(value, dict):
+            found = parse_bell_schedule(value, _depth + 1)
+            if found:
+                return found
     return {}
+
+
+_MANUAL_SLOT_RE = re.compile(r"(?:(\d{1,2})\s*[=:]\s*)?(\d{1,2}[:.]\d{2})\s*[-\u2013]\s*(\d{1,2}[:.]\d{2})")
+
+
+def parse_manual_bell(text: str | None) -> BellSchedule:
+    """Lesson times typed by the user: ``08:00-08:45, 08:45-09:30`` or ``1=08:00-08:45`` per lesson.
+
+    Unnumbered slots count up from the previous lesson number (starting at 1).
+    Raises ValueError when the text has content but no usable slot, or a slot ends before it starts.
+    """
+    bell: BellSchedule = {}
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return bell
+    number = 0
+    for part in re.split(r"[,;\n]+", cleaned):
+        if not part.strip():
+            continue
+        match = _MANUAL_SLOT_RE.fullmatch(part.strip())
+        if not match:
+            raise ValueError(f"cannot read lesson time {part.strip()!r}")
+        number = int(match.group(1)) if match.group(1) else number + 1
+        start, end = parse_time(match.group(2)), parse_time(match.group(3))
+        if start is None or end is None or start >= end:
+            raise ValueError(f"lesson {number} must end after it starts")
+        bell[number] = (start, end)
+    return bell
+
+
+def board_available(data: Any) -> bool:
+    """False when the tests board answered with every list null (the school does not use it)."""
+    if not isinstance(data, dict):
+        return False
+    return any(data.get(key) is not None for key in ("exams", "events", "vactications", "vacations", "hours"))
 
 
 @dataclass

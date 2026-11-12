@@ -15,19 +15,19 @@ One **account device** and one **device per student**.
 
 | Entity | Device | State | Attributes |
 | --- | --- | --- | --- |
-| Current lesson | student | the subject being taught right now, `Break` between lessons, `No lesson` outside school hours | teacher, room, hour, start, end, changed, next_subject, next_start, lessons_today, times_known |
+| Current lesson | student | the subject being taught right now, `Break` between lessons, `No lesson` outside school hours | teacher, topic, room, hour, start, end, changed, next_subject, next_start, lessons_today, times_known |
 | Next test | student | date of the next exam for the student's class | title, subject, start, end, from_hour, to_hour, note, days_until |
 | Upcoming tests | student | number of exams from today onward | `tests` list |
 | Latest grade | student | the most recent mark | subject, title, type, date, weight, teacher, remark, `recent` list |
 | Schedule changes today | student | substitutions, cancellations, exams and notices on today's board | `changes` (kind, text, hour, teacher, room, note) |
-| Homework today | student | number of assignments due today | `items` (subject, teacher, hour, homework text, status), `text` |
-| Behaviour events | student | number of discipline records | `events` (date, event, subject, teacher, remark, justified) |
-| Lessons today | student | number of timetable slots today | `today`, `week` (date, hour, subject, teacher, room, changed, start, end) |
-| Class | student (diagnostic) | class name, e.g. `ג'2` | school, class code/number, study year |
+| Homework today | student | homework written on today's lessons | `items` (date, hour, subject, teacher, homework), `text`, `week` (everything from this week's lessons), `week_count` |
+| Behaviour events | student | behaviour records from the last 7 days, commendations included | `today`, `total` (school year), `by_type`, `events` (date, hour, event, subject, teacher, remark, justified) |
+| Lessons today | student | number of lessons today | `today`, `week` (date, hour, subject, teacher, topic, room, start, end) |
+| Class | student (diagnostic) | class, e.g. `ג'2` | school, class code/number, study year |
 | School calendar | student (calendar) | exams, school events and vacations for the student's class | standard calendar events; timed when lesson numbers are known |
-| Unread messages | account | unread count in the inbox | `total`, `messages` (subject, sender, sent_at, read/attachment flags, student) |
+| Unread messages | account | the portal's unread-messages badge | `total`, `messages` (subject, sender, sent_at, read/attachment flags, student) |
 | Last message | account | subject of the newest message | sender, sent_at, flags |
-| Unread notifications | account | unread portal notifications | |
+| Unread notifications | account | the portal's unread-notifications badge | `latest` (date, message, module, kind) |
 
 ### Current lesson and history
 
@@ -35,8 +35,17 @@ The **Current lesson** sensor changes state at the exact minute a lesson
 starts or ends, using the timetable and the school's bell schedule. It runs
 on its own timer, so it does not wait for the next poll. Open the entity's
 history (or add a History graph card) to see the day as a strip of subjects.
-If the portal gives lessons but no lesson times, the state is `unknown` and
-the `times_known` attribute is `false`.
+Lesson times come from the portal when the school publishes them. Many do
+not: the portal then answers `:` for every lesson, the state is `unknown` and
+the `times_known` attribute is `false`. In that case open the integration's
+**Configure** dialog and type the school's lesson times once, in lesson order:
+
+```text
+08:00-08:45, 08:45-09:30, 09:50-10:35, 10:35-11:20, 11:40-12:25, 12:25-13:10
+```
+
+Prefix a lesson number to start elsewhere (`0=07:15-08:00`). Typed times win
+over the portal's and apply to every student on the account.
 
 ### Events
 
@@ -47,6 +56,7 @@ a baseline, so nothing is replayed.
 | Event | Data |
 | --- | --- |
 | `webtop_new_homework` | `student`, `student_key`, `subject`, `teacher`, `homework`, `hour`, `date`, `status`, `entry_id` |
+| `webtop_new_behaviour_event` | `student`, `student_key`, `event`, `subject`, `teacher`, `date`, `hour`, `remark`, `justified`, `entry_id` |
 | `webtop_new_grade` | `student`, `student_key`, `subject`, `grade`, `title`, `type`, `date`, `weight`, `teacher`, `remark`, `entry_id` |
 | `webtop_new_test` | `student`, `student_key`, `title`, `subject`, `date`, `start`, `end`, `from_hour`, `to_hour`, `note`, `entry_id` |
 | `webtop_new_message` | `subject`, `sender`, `sent_at`, `has_read`, `has_files`, `student`, `entry_id` |
@@ -89,7 +99,12 @@ Settings → Devices & services → **Add integration** → *Webtop (SmartSchool
 | Login data override (advanced) | Leave empty. The login request carries a `Data` value derived from your username; the integration computes it the same way the Webtop web client does. Fill this in only to force a value captured from the browser. |
 
 Options (⋮ → *Configure*): the polling interval in minutes (default 30,
-minimum 10). Each poll is a handful of requests per student; keep it polite.
+minimum 10) and optional lesson times (see *Current lesson and history*).
+Each poll is about ten requests per student; keep it polite.
+
+A parent account that links several logins, one per school, is read school
+by school: the integration switches the session the way the portal's own
+school picker does.
 
 If Webtop rejects the credentials later (for example after a password
 change), the integration asks you to **re-authenticate** from the
@@ -110,19 +125,21 @@ integrations page.
 - **pywebtop's built-in `Data` default is not used.** It is the value for one
   particular username. The integration computes `Data` per login from the
   username and the server's login counter (see `auth.py`).
-- **The newer features are built from the web client's code, not from real
-  data yet.** Tests, grades, schedule changes, the bell schedule and lesson
-  times use field names read out of the Webtop web client. They are covered
-  by tests on synthetic data but unconfirmed against a live account. Run the
-  capture tool below to confirm or correct them.
-- **Response shapes are only partly documented.** Homework, messages and
-  student discovery follow payloads other projects have published. The
-  timetable, behaviour-event and notification parsers are tolerant and
-  best-effort. If a sensor shows `unknown` or the wrong value, download the
-  integration's **diagnostics** (personal data is redacted, raw payload
-  samples are included) and open an issue.
-- Homework comes from the dashboard endpoint, which only returns **today's**
-  lessons. The week view is available through the timetable attributes.
+- **What has been checked against a real account, and what has not.** A
+  capture from one primary-school account confirmed login, student discovery,
+  the dated week of lessons with homework and topics, the standing timetable,
+  behaviour events, the inbox, notifications and menu badges. That school does
+  not use the tests board, grades or the daily changes board and publishes no
+  lesson times, so **tests, grades, schedule changes and portal-supplied
+  lesson times still follow the web client's code only**. Switching between
+  linked schools is also unconfirmed. Run the capture tool below on an account
+  that has them to confirm or correct these.
+- **A feature the school has switched off shows `unknown`,** not zero. The
+  portal says which widgets are allowed, and the integration does not request
+  the others.
+- Homework is what teachers wrote on this week's lessons, each item dated by
+  its lesson. If that view is blocked, the integration falls back to the
+  dashboard's today-only list and the standing weekday timetable.
 - The tests board is read for the current month and the next one.
 - Lesson times assume Home Assistant runs in the school's timezone.
 - Event detection lives in memory; a restart re-baselines and will not fire
@@ -153,12 +170,14 @@ What it does:
 - Asks for your username and password in the terminal. The password is not
   echoed, stored or logged.
 - Logs in and calls a fixed list of read-only endpoints (see `ENDPOINTS` in
-  the script) for up to two children.
+  the script) for up to two children per school. An account that links
+  several logins is captured school by school; `--current-only` stays on the
+  first.
 - Classifies every text field with a **local** model. It looks for a running
   `llama-server` with a Qwen or Gemma model and refuses any address that is
-  not loopback. Tokens, ids, names, contact details and grades are replaced by
-  key-name rules that the model cannot override, and any field the model does
-  not classify is redacted.
+  not loopback. Tokens, ids, names, contact details, grades and the text of
+  messages and notifications are replaced by rules that the model cannot
+  override, and any field the model does not classify is redacted.
 - Replaces values while keeping the exact JSON structure, key names and value
   types, then runs a final check for your account's known names and ids.
 - Writes `captures/<timestamp>/*.json` and a `manifest.json` with the request

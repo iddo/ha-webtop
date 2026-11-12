@@ -8,12 +8,11 @@ import pytest
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import async_capture_events, async_fire_time_changed
-from webtop import WebtopRequestError
 
-from custom_components.webtop.const import CONF_SCAN_INTERVAL, EVENT_NEW_GRADE, EVENT_NEW_TEST
+from custom_components.webtop.const import CONF_LESSON_TIMES, CONF_SCAN_INTERVAL, EVENT_NEW_GRADE, EVENT_NEW_TEST
 from custom_components.webtop.diagnostics import async_get_config_entry_diagnostics
 
-from .conftest import GRADES, TESTS_BOARD
+from .conftest import GRADES, TESTS_BOARD, TESTS_BOARD_UNUSED, WEEKLY_WITHOUT_TIMES
 
 LESSON = "sensor.nv_m_lvy_current_lesson"
 
@@ -61,7 +60,7 @@ async def test_current_lesson_follows_the_clock_between_polls(
 
     await _go_to(hass, freezer, "08:45:01")
     state = hass.states.get(LESSON)
-    assert state.state == "אנגלית" and state.attributes["changed"] is True
+    assert state.state == "אנגלית" and state.attributes["topic"] == "Unit 3"
 
     await _go_to(hass, freezer, "09:30:01")
     assert hass.states.get(LESSON).state == "No lesson"
@@ -86,18 +85,77 @@ async def test_current_lesson_rolls_over_at_midnight(
     assert state.attributes["next_start"] == "2026-11-11T08:00:00+02:00"
 
 
-async def test_current_lesson_unknown_without_lesson_times(
+async def test_lesson_times_fall_back_to_the_weekly_schedule(
     hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
 ) -> None:
-    fake_client.responses["EventsTestsBoard"] = WebtopRequestError("POST /x failed (500): oops")
+    """A school without a tests board can still publish lesson times on its weekly schedule."""
+    fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
+    freezer.move_to("2026-11-10 08:10:00+02:00")
+    await _setup(hass, config_entry)
+    assert hass.states.get(LESSON).state == "מתמטיקה"
+    # No board: tests are unknown rather than a misleading zero.
+    assert hass.states.get("sensor.nv_m_lvy_next_test").state == "unknown"
+    assert hass.states.get("sensor.nv_m_lvy_upcoming_tests").state == "unknown"
+
+    client = fake_client.created[0]
+    assert len([c for c in client.calls if c[0] == "EventsTestsBoard"]) == 1  # not once per month
+    assert len([c for c in client.calls if c[0] == "WeeklySchedualeForToday"]) == 2  # once per child
+
+    # Neither lookup is repeated on later polls the same day.
+    freezer.tick(timedelta(minutes=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert len([c for c in client.calls if c[0] == "EventsTestsBoard"]) == 1
+    assert len([c for c in client.calls if c[0] == "WeeklySchedualeForToday"]) == 2
+    assert hass.states.get(LESSON).state == "מתמטיקה"
+
+
+async def test_current_lesson_unknown_when_the_school_publishes_no_times(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
+) -> None:
+    """The shape of the first real capture: no tests board, and ":" for every lesson time."""
+    fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
+    fake_client.responses["WeeklySchedualeForToday"] = WEEKLY_WITHOUT_TIMES
     freezer.move_to("2026-11-10 08:10:00+02:00")
     await _setup(hass, config_entry)
     state = hass.states.get(LESSON)
     assert state.state == "unknown"
     assert state.attributes["times_known"] is False and state.attributes["lessons_today"] == 2
-    # Tests are unknown too, but the rest of the integration is unaffected.
-    assert hass.states.get("sensor.nv_m_lvy_next_test").state == "unknown"
+    # The rest of the integration is unaffected.
     assert hass.states.get("sensor.nv_m_lvy_homework_today").state == "1"
+    assert hass.states.get("sensor.nv_m_lvy_lessons_today").state == "2"
+
+
+async def test_typed_lesson_times_fill_the_gap_and_win_over_the_portal(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
+) -> None:
+    fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
+    fake_client.responses["WeeklySchedualeForToday"] = WEEKLY_WITHOUT_TIMES
+    freezer.move_to("2026-11-10 08:10:00+02:00")
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        config_entry, options={CONF_SCAN_INTERVAL: 30, CONF_LESSON_TIMES: "07:30-08:20, 08:20-09:10"}
+    )
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(LESSON)
+    assert state.state == "מתמטיקה"
+    assert state.attributes["end"] == "2026-11-10T08:20:00+02:00"
+    assert state.attributes["next_start"] == "2026-11-10T08:20:00+02:00"
+    # With times typed in, the portal is not asked for them.
+    assert not [c for c in fake_client.created[0].calls if c[0] == "WeeklySchedualeForToday"]
+
+
+async def test_bad_lesson_times_option_is_ignored_not_fatal(
+    hass: HomeAssistant, fake_client, config_entry, caplog: pytest.LogCaptureFixture, in_israel
+) -> None:
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(config_entry, options={CONF_LESSON_TIMES: "whenever"})
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert "Ignoring the lesson times option" in caplog.text
+    assert hass.states.get(LESSON).attributes["times_known"] is True  # the portal's times are used
 
 
 async def test_test_grade_and_change_sensors(hass: HomeAssistant, fake_client, config_entry, in_israel) -> None:

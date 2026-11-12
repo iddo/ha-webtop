@@ -11,6 +11,7 @@ from webtop import WebtopLoginError
 from custom_components.webtop.auth import compute_login_data
 from custom_components.webtop.const import (
     CONF_DATA,
+    CONF_LESSON_TIMES,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
@@ -173,9 +174,29 @@ async def test_options_flow_sets_interval_and_reloads(hass: HomeAssistant, fake_
 
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
     assert result["type"] is FlowResultType.FORM
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {CONF_SCAN_INTERVAL: 60})
+
+    # Lesson times that cannot be read keep the form open with an error on that field.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_SCAN_INTERVAL: 60, CONF_LESSON_TIMES: "09:00-08:00"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_LESSON_TIMES: "invalid_lesson_times"}
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_SCAN_INTERVAL: 60, CONF_LESSON_TIMES: " 08:00-08:45, 08:45-09:30 "}
+    )
     await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert config_entry.options[CONF_SCAN_INTERVAL] == 60
+    assert config_entry.options == {CONF_SCAN_INTERVAL: 60, CONF_LESSON_TIMES: "08:00-08:45, 08:45-09:30"}
     assert config_entry.runtime_data.update_interval.total_seconds() == 3600
+
+
+async def test_options_flow_lesson_times_are_optional(hass: HomeAssistant, fake_client, config_entry) -> None:
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {CONF_SCAN_INTERVAL: 45})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert config_entry.options == {CONF_SCAN_INTERVAL: 45, CONF_LESSON_TIMES: ""}

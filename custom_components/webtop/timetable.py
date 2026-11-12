@@ -57,6 +57,10 @@ class Slot:
         return " / ".join(dict.fromkeys(lesson.teacher for lesson in self.lessons if lesson.teacher))
 
     @property
+    def topic(self) -> str:
+        return " / ".join(dict.fromkeys(lesson.topic for lesson in self.lessons if lesson.topic))
+
+    @property
     def room(self) -> str:
         return " / ".join(dict.fromkeys(lesson.room for lesson in self.lessons if lesson.room))
 

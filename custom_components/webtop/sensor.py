@@ -29,8 +29,8 @@ from homeassistant.util import dt as dt_util
 from .const import MAX_LIST_ATTR_ITEMS
 from .coordinator import WebtopConfigEntry, WebtopCoordinator, WebtopData
 from .entity import WebtopAccountEntity, WebtopStudentEntity
-from .models import SchoolEvent, Student
-from .timetable import Now, resolve
+from .models import HomeworkItem, Lesson, SchoolEvent, Student
+from .timetable import Now, lessons_on, resolve
 
 
 def _today() -> str:
@@ -53,45 +53,70 @@ class StudentSensorDescription(SensorEntityDescription):
     attrs_fn: Callable[[WebtopData, Student], dict[str, Any]] | None = None
 
 
+def _homework_today(data: WebtopData, student: Student) -> list[HomeworkItem]:
+    return [h for h in data.homework.get(student.key, []) if _is_today(h.date)]
+
+
 def _homework_value(data: WebtopData, student: Student) -> int | None:
     if not data.homework_ok.get(student.key):
         return None
-    return len(data.homework[student.key])
+    return len(_homework_today(data, student))
 
 
 def _homework_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
-    items = data.homework.get(student.key, [])
+    today = _homework_today(data, student)
+    week = data.homework.get(student.key, [])
     return {
-        "items": [h.as_dict() for h in items[:MAX_LIST_ATTR_ITEMS]],
-        "text": "\n".join(f"{h.subject}: {h.homework}" for h in items) or "No homework",
+        "items": [h.as_dict() for h in today[:MAX_LIST_ATTR_ITEMS]],
+        "text": "\n".join(f"{h.subject}: {h.homework}" for h in today) or "No homework",
+        # Everything written on this week's lessons, oldest first.
+        "week": [h.as_dict() for h in week[: MAX_LIST_ATTR_ITEMS * 2]],
+        "week_count": len(week),
     }
 
 
+BEHAVIOUR_WINDOW_DAYS = 7
+
+
 def _discipline_value(data: WebtopData, student: Student) -> int | None:
+    """Behaviour records from the last week (the portal keeps the whole year)."""
     if not data.discipline_ok.get(student.key):
         return None
-    return len(data.discipline[student.key])
+    since = (dt_util.now().date() - dt.timedelta(days=BEHAVIOUR_WINDOW_DAYS - 1)).isoformat()
+    return sum(1 for e in data.discipline[student.key] if e.date[:10] >= since)
 
 
 def _discipline_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
-    events = sorted(data.discipline.get(student.key, []), key=lambda e: e.date, reverse=True)
-    return {"events": [e.as_dict() for e in events[:MAX_LIST_ATTR_ITEMS]]}
+    events = data.discipline.get(student.key, [])
+    by_type: dict[str, int] = {}
+    for event in events:
+        by_type[event.event] = by_type.get(event.event, 0) + 1
+    return {
+        "today": sum(1 for e in events if _is_today(e.date)),
+        "total": len(events),
+        "by_type": dict(sorted(by_type.items(), key=lambda kv: -kv[1])),
+        "events": [e.as_dict() for e in events[:MAX_LIST_ATTR_ITEMS]],
+    }
+
+
+def _lessons_today(data: WebtopData, student: Student) -> list[Lesson]:
+    lessons = lessons_on(data.schedule.get(student.key, []), dt_util.now().date())
+    return sorted(lessons, key=lambda lesson: lesson.hour if lesson.hour is not None else 99)
 
 
 def _lessons_value(data: WebtopData, student: Student) -> int | None:
     if not data.schedule_ok.get(student.key):
         return None
-    return sum(1 for lesson in data.schedule[student.key] if _is_today(lesson.date))
+    return len(_lessons_today(data, student))
 
 
 def _lessons_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
     lessons = sorted(
         data.schedule.get(student.key, []),
-        key=lambda lesson: (lesson.date, lesson.hour if lesson.hour is not None else 99),
+        key=lambda lesson: (lesson.date, lesson.weekday or 0, lesson.hour if lesson.hour is not None else 99),
     )
-    today = [lesson.as_dict() for lesson in lessons if _is_today(lesson.date)]
     return {
-        "today": today,
+        "today": [lesson.as_dict() for lesson in _lessons_today(data, student)],
         "week": [lesson.as_dict() for lesson in lessons[: MAX_LIST_ATTR_ITEMS * 2]],
     }
 
@@ -291,6 +316,7 @@ class WebtopCurrentLessonSensor(WebtopStudentEntity, SensorEntity):
         current, upcoming = now.current, now.upcoming
         return {
             "teacher": current.teacher if current else None,
+            "topic": current.topic if current else None,
             "room": current.room if current else None,
             "hour": current.hour if current else None,
             "start": current.start.isoformat() if current else None,
@@ -363,7 +389,12 @@ ACCOUNT_SENSORS: tuple[AccountSensorDescription, ...] = (
         icon="mdi:email-alert",
         native_unit_of_measurement="messages",
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: sum(1 for m in data.messages if not m.has_read),
+        # The portal's own badge when available; otherwise count the first inbox page.
+        value_fn=lambda data: (
+            data.unread_messages
+            if data.unread_messages is not None
+            else sum(1 for m in data.messages if not m.has_read)
+        ),
         attrs_fn=lambda data: {
             "total": len(data.messages),
             "messages": [m.as_dict() for m in data.messages[:MAX_LIST_ATTR_ITEMS]],
@@ -383,6 +414,7 @@ ACCOUNT_SENSORS: tuple[AccountSensorDescription, ...] = (
         native_unit_of_measurement="notifications",
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda data: data.unread_notifications,
+        attrs_fn=lambda data: {"latest": [n.as_dict() for n in data.notifications[:MAX_LIST_ATTR_ITEMS]]},
     ),
 )
 

@@ -10,6 +10,10 @@ stored, logged or written anywhere), logs in with pywebtop, calls a fixed list
 of read-only endpoints, and anonymizes every response with a model running on
 this machine before anything is saved. Raw responses exist only in memory.
 
+An account that links several logins (children in different schools) is
+captured school by school, switching the session the same way the portal's
+own school picker does. Use ``--current-only`` to stay on the first one.
+
 Output goes to ``captures/<timestamp>/``: one JSON file per endpoint plus a
 ``manifest.json`` describing the requests, the anonymization plan and how many
 items the integration's own parsers found. Read the files before sharing them.
@@ -63,8 +67,10 @@ PUPIL_CARD = {
     "moduleID": 10,
 }
 
+# Asked once, before any switching: the logins linked to this account (one per school).
+LINKED = Endpoint("linked_students", "user/GetMultipleUsersForUser", {})
+
 ENDPOINTS: tuple[Endpoint, ...] = (
-    Endpoint("linked_students", "user/GetMultipleUsersForUser", {}),
     Endpoint("dashboard_init", "dashboard/InitDashboard", {}),
     Endpoint("menu_counters", "Menu/GetMenuCounters", {}),
     Endpoint("unread_notifications", "Menu/GetPreviewUnreadNotifications", {}),
@@ -178,6 +184,16 @@ def fill(template: Any, context: dict[str, Any]) -> Any:
     return template
 
 
+_PERSONAL_LOGIN_KEYS = (
+    "firstName", "lastName", "fullName", "schoolName", "userId", "id", "userName", "studentEmail", "cellphone",
+)  # fmt: skip
+
+
+def personal_literals(login: dict[str, Any]) -> set[str]:
+    """Values from a session's login data that must never appear in the output."""
+    return {str(login[k]) for k in _PERSONAL_LOGIN_KEYS if login.get(k) not in (None, "", 0)}
+
+
 def pick(data: dict[str, Any], *names: str) -> Any:
     for name in names:
         if data.get(name) not in (None, ""):
@@ -185,22 +201,57 @@ def pick(data: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def parser_summary(name: str, data: Any, today: str) -> dict[str, int] | None:
-    """How many items the integration's parsers extract from the RAW data (counts only)."""
+def parser_summary(name: str, data: Any, today: str) -> dict[str, Any] | None:
+    """What the integration's parsers extract from the RAW data (counts only, never values)."""
+    base = re.sub(r"^school\d+__|__student\d+$", "", name)
     try:
-        if name == "dashboard_init":
+        if base == "dashboard_init":
             return {"students": len(models.parse_students(data))}
-        if name == "messages_inbox":
+        if base == "messages_inbox":
             return {"messages": len(models.parse_messages(data))}
-        if name == "unread_notifications":
-            count = models.parse_unread_count(data)
-            return {"unread": -1 if count is None else count}
-        if name.startswith("homework_today"):
-            return {"homework": len(models.parse_homework(data, date=today))}
-        if name.startswith(("discipline_dashboard", "pupil_discipline")):
-            return {"events": len(models.parse_discipline(data))}
-        if name.startswith(("pupil_schedule", "pupil_lessons_homework", "schedule_today", "class_schedule")):
-            return {"lessons": len(models.parse_schedule(data))}
+        if base == "menu_counters":
+            counters = models.parse_menu_counters(data)
+            return {
+                "has_unread_messages": counters.unread_messages is not None,
+                "has_unread_notifications": counters.unread_notifications is not None,
+            }
+        if base == "unread_notifications":
+            return {"notifications": len(models.parse_notifications(data))}
+        if base == "events_tests_board":
+            events = models.parse_tests_board(data)
+            return {
+                "available": models.board_available(data),
+                "exams": sum(1 for e in events if e.kind == "exam"),
+                "events": sum(1 for e in events if e.kind == "event"),
+                "vacations": sum(1 for e in events if e.kind == "vacation"),
+                "bell_hours": len(models.parse_bell_schedule(data)),
+            }
+        if base == "homework_today":
+            return {"allowed": models.view_allowed(data), "homework": len(models.parse_homework(data, date=today))}
+        if base in ("discipline_dashboard", "pupil_discipline"):
+            return {"allowed": models.view_allowed(data), "events": len(models.parse_discipline(data))}
+        if base in ("grades_latest", "pupil_grades", "pupil_period_grades"):
+            return {"allowed": models.view_allowed(data), "grades": len(models.parse_grades(data))}
+        if base in ("changes_today", "changes_week"):
+            return {"allowed": models.view_allowed(data), "changes": len(models.parse_changes(data))}
+        if base == "weekly_schedule_today":
+            return {"bell_hours": len(models.parse_bell_schedule(data))}
+        if base in ("pupil_schedule", "pupil_lessons_homework", "schedule_today", "class_schedule"):
+            lessons = models.parse_schedule(data)
+            homework = [h.homework for h in models.homework_from_lessons(lessons)]
+            return {
+                "lessons": len(lessons),
+                "dated": sum(1 for x in lessons if x.date),
+                "with_weekday": sum(1 for x in lessons if x.weekday is not None),
+                "with_teacher": sum(1 for x in lessons if x.teacher),
+                "with_room": sum(1 for x in lessons if x.room),
+                "with_topic": sum(1 for x in lessons if x.topic),
+                "homework_items": len(homework),
+                # A text repeated across many lessons is probably a stock "no homework" phrase
+                # the integration does not know yet.
+                "homework_most_repeated": max((homework.count(h) for h in set(homework)), default=0),
+                "bell_hours": len(models.parse_bell_schedule(data)),
+            }
     except Exception as err:
         return {f"parser_crashed_{type(err).__name__}": 1}
     return None
@@ -240,19 +291,15 @@ async def capture(args: argparse.Namespace, username: str, password: str, llm: L
 
         login = dict(session.raw_login_data or {})
         raw["login"] = login
-        literals |= {str(v) for v in (session.first_name, session.last_name, session.school_name) if v}
-        literals |= {str(login.get(k)) for k in ("userId", "id", "studentId", "userName") if login.get(k)}
+        literals |= personal_literals(login)
         base_context = {
             "institution_code": pick(login, "institutionCode", "InstitutionCode", "schoolId"),
             "study_year": now.year + 1 if now.month >= 8 else now.year,
             "now_iso": now.replace(microsecond=0).isoformat(),
         }
-        print(f"Logged in. Capturing {len(ENDPOINTS)} read-only endpoints ...")
+        print(f"Logged in. Capturing {len(ENDPOINTS) + 1} read-only endpoints per school ...")
 
-        students: list[models.Student] = []
-
-        async def call(endpoint: Endpoint, context: dict[str, Any], suffix: str = "") -> None:
-            name = endpoint.name + suffix
+        async def call(endpoint: Endpoint, context: dict[str, Any], name: str) -> None:
             entry: dict[str, Any] = {"name": name, "path": endpoint.path, "payload_template": endpoint.payload}
             try:
                 response = await client.request("POST", API + endpoint.path, json=fill(endpoint.payload, context))
@@ -280,36 +327,71 @@ async def capture(args: argparse.Namespace, username: str, password: str, llm: L
                         entry["parsed_by_integration"] = summary
             manifest.append(entry)
             flag = entry.get("http_error") or ("ok" if entry.get("status") is not False else "status=false")
-            print(f"  {name:<34} {flag}")
+            print(f"  {name:<46} {flag}")
             await asyncio.sleep(0.4)
 
-        for endpoint in ENDPOINTS:
-            if not endpoint.per_student:
-                await call(endpoint, base_context)
-                if endpoint.name == "dashboard_init":
-                    dashboard = raw.get("dashboard_init")
-                    data = dashboard.get("data") if isinstance(dashboard, dict) else None
-                    students = models.parse_students(data)
-                    if not students:
-                        fallback = models.student_from_login(login)
-                        students = [fallback] if fallback else []
-                    for s in students:
-                        literals |= {s.name, s.student_id, s.key, *s.name.split()}
-                        literals |= {str(s.raw.get(k)) for k in ("firstName", "lastName") if s.raw.get(k)}
-                continue
-            for index, student in enumerate(students[: args.max_students], 1):
-                context = {
-                    **base_context,
-                    "student_id": student.student_id,
-                    "class_code": student.class_code,
-                    "class_number": student.class_number,
-                    "study_year": student.study_year or base_context["study_year"],
-                }
-                await call(endpoint, context, suffix=f"__student{index}")
+        await call(LINKED, base_context, LINKED.name)
+        listing = raw.get(LINKED.name)
+        linked = [x for x in (listing.get("data") if isinstance(listing, dict) else None) or [] if isinstance(x, dict)]
+        for item in linked:
+            literals |= {str(v) for v in item.values() if isinstance(v, str) and 3 <= len(v) <= 200}
+        schools: list[dict[str, Any] | None] = linked if len(linked) > 1 and not args.current_only else [None]
+        if len(linked) > 1:
+            print(f"This account links {len(linked)} logins (schools); capturing {len(schools)}.")
 
-    for linked in (raw.get("linked_students") or {}).get("data") or []:
-        if isinstance(linked, dict):
-            literals |= {str(v) for v in linked.values() if isinstance(v, str) and 3 <= len(v) <= 40}
+        students_total = 0
+        for number, school in enumerate(schools, 1):
+            prefix = f"school{number}__" if len(schools) > 1 else ""
+            if school is not None:
+                target = str(school.get("studentId") or "")
+                current = str((client.session.raw_login_data or {}).get("id") or "")
+                switch: dict[str, Any] = {"name": f"{prefix}switch", "path": "user/ChangeUser"}
+                if target == current:
+                    switch["result"] = "already on this login; no switch needed"
+                else:
+                    try:
+                        await client.switch_student(student_id=target)
+                        switch["result"] = "ok"
+                    except WebtopError as err:
+                        switch["result"] = f"failed ({type(err).__name__})"
+                    await asyncio.sleep(0.4)
+                manifest.append(switch)
+                print(f"  {switch['name']:<46} {switch['result']}")
+                if switch["result"].startswith("failed"):
+                    continue
+                login = dict(client.session.raw_login_data or {})
+                raw[f"{prefix}session"] = login
+                literals |= personal_literals(login)
+            school_context = {
+                **base_context,
+                "institution_code": pick(login, "institutionCode", "InstitutionCode", "schoolId"),
+            }
+
+            students: list[models.Student] = []
+            for endpoint in ENDPOINTS:
+                if not endpoint.per_student:
+                    await call(endpoint, school_context, prefix + endpoint.name)
+                    if endpoint.name == "dashboard_init":
+                        dashboard = raw.get(prefix + "dashboard_init")
+                        data = dashboard.get("data") if isinstance(dashboard, dict) else None
+                        students = models.parse_students(data)
+                        if not students:
+                            fallback = models.student_from_login(login)
+                            students = [fallback] if fallback else []
+                        for s in students:
+                            literals |= {s.name, s.student_id, *s.name.split()}
+                            literals |= {str(s.raw.get(k)) for k in ("firstName", "lastName") if s.raw.get(k)}
+                    continue
+                for index, student in enumerate(students[: args.max_students], 1):
+                    context = {
+                        **school_context,
+                        "student_id": student.student_id,
+                        "class_code": student.class_code,
+                        "class_number": student.class_number,
+                        "study_year": student.study_year or base_context["study_year"],
+                    }
+                    await call(endpoint, context, f"{prefix}{endpoint.name}__student{index}")
+            students_total += min(len(students), args.max_students)
 
     how = f"with local model {llm.model}" if llm else "in strict mode"
     print(f"\nAnonymizing {len(raw)} responses {how} ...")
@@ -325,8 +407,9 @@ async def capture(args: argparse.Namespace, username: str, password: str, llm: L
         json.dumps(
             {
                 "captured_at": today,
-                "students_captured": min(len(students), args.max_students),
-                "students_on_account": len(students),
+                "linked_logins": len(linked),
+                "schools_captured": len(schools),
+                "students_captured": students_total,
                 "login_counter": counter,
                 "anonymizer": {
                     "model": llm.model if llm else None,
@@ -334,7 +417,7 @@ async def capture(args: argparse.Namespace, username: str, password: str, llm: L
                     "fields_answered": result.llm_answered,
                     "values_redacted_by_default": result.redacted_by_default,
                     "leaks_removed_by_final_check": result.leaks_removed,
-                    "plan": {p.split(".", 1)[-1] if "." in p else p: c for p, c in result.plan.items()},
+                    "plan": result.plan,
                 },
                 "requests": manifest,
             },
@@ -356,7 +439,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", default="captures", help="output directory (default: captures/)")
     parser.add_argument("--username", help="Webtop username (otherwise you are asked)")
-    parser.add_argument("--max-students", type=int, default=2, help="capture at most this many children (default 2)")
+    parser.add_argument(
+        "--max-students", type=int, default=2, help="capture at most this many children per school (default 2)"
+    )
+    parser.add_argument(
+        "--current-only",
+        action="store_true",
+        help="do not switch to the other logins linked to this account; capture the first school only",
+    )
     parser.add_argument("--llm-url", help="local OpenAI-compatible chat completions URL (loopback only)")
     parser.add_argument("--llm-model", default="", help="model name to send with --llm-url")
     parser.add_argument("--prefer", default="qwen,gemma", help="model families to look for, in order")

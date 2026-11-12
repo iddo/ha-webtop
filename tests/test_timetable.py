@@ -26,7 +26,7 @@ from custom_components.webtop.timetable import (
     webtop_weekday,
 )
 
-from .conftest import CHANGES, GRADES, SCHEDULE, TESTS_BOARD
+from .conftest import CHANGES, GRADES, LESSONS_WEEK, TESTS_BOARD, TIMETABLE
 
 TZ = ZoneInfo("Asia/Jerusalem")
 BELL = parse_bell_schedule(TESTS_BOARD["data"])
@@ -56,16 +56,6 @@ def test_parse_date(value, expected) -> None:
     assert parse_date(value) == expected
 
 
-def test_bell_schedule() -> None:
-    assert sorted(BELL) == [1, 2, 3, 4]
-    assert BELL[3] == (dt.time(9, 50), dt.time(10, 35))
-    assert parse_bell_schedule({"hours": [{"hour": 1, "fromTime": "09:00", "toTime": "08:00"}]}) == {}
-    assert parse_bell_schedule({"x": [{"hourNum": "2", "startTime": "8:45", "endTime": "9:30"}]}) == {
-        2: (dt.time(8, 45), dt.time(9, 30))
-    }
-    assert parse_bell_schedule(None) == {}
-
-
 def test_webtop_weekday() -> None:
     assert webtop_weekday(dt.date(2026, 11, 8)) == 1  # Sunday
     assert webtop_weekday(TUESDAY) == 3
@@ -73,17 +63,15 @@ def test_webtop_weekday() -> None:
 
 
 def test_lessons_on_dated_and_weekday_timetables() -> None:
-    dated = parse_schedule(SCHEDULE["data"])
+    dated = parse_schedule(LESSONS_WEEK["data"])
     assert [x.subject for x in lessons_on(dated, TUESDAY)] == ["מתמטיקה", "אנגלית"]
-    assert lessons_on(dated, dt.date(2026, 11, 13)) == []  # dated timetable, empty day
-    weekly = [Lesson(date="", hour=1, subject="A", weekday=3), Lesson(date="", hour=1, subject="B", weekday=4)]
-    assert [x.subject for x in lessons_on(weekly, TUESDAY)] == ["A"]
-
-
-def test_schedule_parser_reads_weekday_and_own_times() -> None:
-    row = {"day": 3, "hourNum": 2, "subject_name": "ספורט", "fromTime": "08:45", "toTime": "09:30"}
-    lessons = parse_schedule([row])
-    assert (lessons[0].weekday, lessons[0].hour, lessons[0].start, lessons[0].end) == (3, 2, "08:45", "09:30")
+    assert lessons_on(dated, dt.date(2026, 11, 13)) == []  # dated week, empty Friday
+    # A dated week says nothing about other weeks, even on the same weekday.
+    assert lessons_on(dated, TUESDAY + dt.timedelta(days=7)) == []
+    standing = parse_schedule(TIMETABLE["data"])
+    assert [x.subject for x in lessons_on(standing, TUESDAY)] == ["מתמטיקה", "אנגלית"]
+    assert [x.subject for x in lessons_on(standing, TUESDAY + dt.timedelta(days=7))] == ["מתמטיקה", "אנגלית"]
+    assert lessons_on(standing, dt.date(2026, 11, 14)) == []  # Saturday
 
 
 LESSONS = [

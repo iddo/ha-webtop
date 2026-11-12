@@ -23,6 +23,9 @@ LEGACY_DEFAULT_DATA = "+Aabe7FAdVluG6Lu+0ibrA=="
 CONF_SCAN_INTERVAL = "scan_interval"  # minutes
 DEFAULT_SCAN_INTERVAL = 30
 MIN_SCAN_INTERVAL = 10
+# Lesson times typed by the user, for schools that do not publish them:
+# "08:00-08:45, 08:45-09:30, ..." in lesson order, or "1=08:00-08:45" per lesson.
+CONF_LESSON_TIMES = "lesson_times"
 MAX_SCAN_INTERVAL = 720
 
 REQUEST_TIMEOUT = 30.0
@@ -35,6 +38,7 @@ MANUFACTURER = "SmartSchool"
 EVENT_NEW_HOMEWORK = f"{DOMAIN}_new_homework"
 EVENT_NEW_MESSAGE = f"{DOMAIN}_new_message"
 EVENT_NEW_GRADE = f"{DOMAIN}_new_grade"
+EVENT_NEW_BEHAVIOUR = f"{DOMAIN}_new_behaviour_event"
 EVENT_NEW_TEST = f"{DOMAIN}_new_test"
 
 # How far ahead the tests board is read, in months (the current month is always included).
