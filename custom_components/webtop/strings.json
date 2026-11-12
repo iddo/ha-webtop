@@ -50,6 +50,21 @@
   },
   "entity": {
     "sensor": {
+      "current_lesson": {
+        "name": "Current lesson"
+      },
+      "next_test": {
+        "name": "Next test"
+      },
+      "upcoming_tests": {
+        "name": "Upcoming tests"
+      },
+      "latest_grade": {
+        "name": "Latest grade"
+      },
+      "schedule_changes_today": {
+        "name": "Schedule changes today"
+      },
       "homework_today": {
         "name": "Homework today"
       },
@@ -70,6 +85,11 @@
       },
       "unread_notifications": {
         "name": "Unread notifications"
+      }
+    },
+    "calendar": {
+      "school": {
+        "name": "School calendar"
       }
     }
   }

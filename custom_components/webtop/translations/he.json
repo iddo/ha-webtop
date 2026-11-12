@@ -50,6 +50,21 @@
   },
   "entity": {
     "sensor": {
+      "current_lesson": {
+        "name": "שיעור נוכחי"
+      },
+      "next_test": {
+        "name": "המבחן הבא"
+      },
+      "upcoming_tests": {
+        "name": "מבחנים קרובים"
+      },
+      "latest_grade": {
+        "name": "ציון אחרון"
+      },
+      "schedule_changes_today": {
+        "name": "שינויים במערכת היום"
+      },
       "homework_today": {
         "name": "שיעורי בית להיום"
       },
@@ -70,6 +85,11 @@
       },
       "unread_notifications": {
         "name": "התראות שלא נקראו"
+      }
+    },
+    "calendar": {
+      "school": {
+        "name": "לוח בית הספר"
       }
     }
   }

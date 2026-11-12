@@ -30,25 +30,38 @@ from .const import (
     CONF_USERNAME,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    EVENT_NEW_GRADE,
     EVENT_NEW_HOMEWORK,
     EVENT_NEW_MESSAGE,
+    EVENT_NEW_TEST,
+    TESTS_BOARD_MONTHS_AHEAD,
 )
 from .models import (
+    BellSchedule,
     DisciplineEvent,
+    Grade,
     HomeworkItem,
     Lesson,
     Message,
+    ScheduleChange,
+    SchoolEvent,
     Student,
     WebtopApiError,
+    parse_bell_schedule,
+    parse_changes,
     parse_discipline,
+    parse_grades,
     parse_homework,
     parse_messages,
     parse_schedule,
     parse_students,
+    parse_tests_board,
     parse_unread_count,
     student_from_login,
     unwrap,
 )
+
+API = "/server/api/"
 
 _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -102,6 +115,15 @@ class WebtopData:
     homework_ok: dict[str, bool] = field(default_factory=dict)
     discipline_ok: dict[str, bool] = field(default_factory=dict)
     schedule_ok: dict[str, bool] = field(default_factory=dict)
+    # Exams, school events and vacations that apply to each student, soonest first.
+    calendar: dict[str, list[SchoolEvent]] = field(default_factory=dict)
+    calendar_ok: dict[str, bool] = field(default_factory=dict)
+    # Lesson number -> (start, end) for each student's school.
+    bell: dict[str, BellSchedule] = field(default_factory=dict)
+    grades: dict[str, list[Grade]] = field(default_factory=dict)
+    grades_ok: dict[str, bool] = field(default_factory=dict)
+    changes: dict[str, list[ScheduleChange]] = field(default_factory=dict)
+    changes_ok: dict[str, bool] = field(default_factory=dict)
     messages: list[Message] = field(default_factory=list)
     unread_notifications: int | None = None
     # Last raw payloads per endpoint, for the diagnostics download only.
@@ -133,6 +155,8 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         # its login "Data" depends on a counter fetched from the server.
         self._client: WebtopClient | None = None
         self._seen_homework: dict[str, set[str]] = {}
+        self._seen_grades: dict[str, set[str]] = {}
+        self._seen_tests: dict[str, set[str]] = {}
         self._seen_messages: set[str] = set()
         self._baseline_done = False
         # Device-registry id of the account device; set once the first poll succeeds.
@@ -273,11 +297,18 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             if not students:
                 _LOGGER.warning("Webtop dashboard listed no students for this session")
 
-            for student in students:
-                if any(s.key == student.key for s in data.students):
-                    continue  # same child reachable through two contexts
+            fresh = [s for s in students if not any(known.key == s.key for known in data.students)]
+            login_data = session.raw_login_data or {}
+            institution = login_data.get("institutionCode") or login_data.get("InstitutionCode")
+            board_events, bell = await self._collect_tests_board(data, institution, now)
+            for student in fresh:  # a child reachable through two contexts is only read once
                 data.students.append(student)
-                await self._collect_student(data, student, today=today, year=school_year_for(now))
+                data.bell[student.key] = bell
+                data.calendar[student.key] = [e for e in board_events or [] if e.applies_to(student)]
+                data.calendar_ok[student.key] = board_events is not None
+                await self._collect_student(
+                    data, student, today=today, year=school_year_for(now), institution=institution
+                )
 
             inbox = unwrap(await client.get_messages_inbox(page_id=1), "GetMessagesInbox")
             data.raw_samples["inbox"] = inbox
@@ -300,13 +331,67 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         data.messages = sorted(messages.values(), key=lambda m: m.sent_at, reverse=True)
         return data
 
-    async def _collect_student(self, data: WebtopData, student: Student, *, today: str, year: int) -> None:
+    async def _post(self, path: str, payload: dict[str, Any]) -> Any:
+        """Call an endpoint pywebtop has no method for."""
+        response = await self.client.request("POST", API + path, json=payload)
+        try:
+            return response.json()
+        except ValueError as err:
+            raise WebtopRequestError(f"POST {path} did not return JSON") from err
+
+    async def _collect_tests_board(
+        self, data: WebtopData, institution: Any, now: Any
+    ) -> tuple[list[SchoolEvent] | None, BellSchedule]:
+        """Exams, events, vacations and the bell schedule for the session's school.
+
+        Returns ``(None, {})`` when the board could not be read at all.
+        """
+        if institution in (None, ""):
+            _LOGGER.debug("Webtop login data has no institution code; skipping the tests board")
+            return None, {}
+        events: dict[str, SchoolEvent] = {}
+        bell: BellSchedule = {}
+        answered = False
+        month = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
+        for _ in range(TESTS_BOARD_MONTHS_AHEAD + 1):
+            payload = await self._optional(
+                "tests board",
+                lambda when=month: self._post(
+                    "shotef/EventsTestsBoard",
+                    {
+                        "institutionCode": institution,
+                        "selectedDate": when.isoformat(),
+                        "selectedView": 3,
+                        "loadFilters": True,
+                        "studyYear": school_year_for(when),
+                    },
+                ),
+                envelope="EventsTestsBoard",
+            )
+            if payload is not None:
+                answered = True
+                data.raw_samples["tests_board"] = payload
+                bell = bell or parse_bell_schedule(payload)
+                for event in parse_tests_board(payload):
+                    events.setdefault(event.identity(), event)
+            month = (month + timedelta(days=32)).replace(day=1)
+        if not answered:
+            return None, {}
+        ordered = sorted(events.values(), key=lambda e: (e.start_date, e.from_hour if e.from_hour is not None else 99))
+        return ordered, bell
+
+    async def _collect_student(
+        self, data: WebtopData, student: Student, *, today: str, year: int, institution: Any = None
+    ) -> None:
         client = self.client
         key = student.key
         data.homework[key] = []
         data.discipline[key] = []
         data.schedule[key] = []
+        data.grades[key] = []
+        data.changes[key] = []
         data.homework_ok[key] = data.discipline_ok[key] = data.schedule_ok[key] = False
+        data.grades_ok[key] = data.changes_ok[key] = False
 
         if not student.has_class_params:
             _LOGGER.warning(
@@ -355,6 +440,40 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             data.raw_samples["schedule"] = payload
             data.schedule[key] = parse_schedule(payload)
             data.schedule_ok[key] = True
+            # Some timetables carry their own lesson times; they beat having none.
+            if not data.bell.get(key):
+                data.bell[key] = parse_bell_schedule(payload)
+
+        payload = await self._optional(
+            f"grades for {student.name}",
+            lambda: self._post("dashboard/GetGrades", {"id": student.student_id, "ClassCode": student.class_code}),
+            envelope="GetGrades",
+        )
+        if payload is not None:
+            data.raw_samples["grades"] = payload
+            data.grades[key] = parse_grades(payload)
+            data.grades_ok[key] = True
+
+        if institution not in (None, ""):
+            payload = await self._optional(
+                f"today's changes for {student.name}",
+                lambda: self._post(
+                    "dashboard/ChangesAndMessagesDataForToday",
+                    {
+                        "institutionCode": institution,
+                        "selectedValue": f"{student.class_code}|{student.class_number}|{student.student_id}",
+                        "typeView": 1,
+                        "todayOnly": True,
+                        "studentId": student.student_id,
+                        "ClassCode": student.class_code,
+                    },
+                ),
+                envelope="ChangesAndMessagesDataForToday",
+            )
+            if payload is not None:
+                data.raw_samples["changes"] = payload
+                data.changes[key] = parse_changes(payload)
+                data.changes_ok[key] = True
 
     # ------------------------------------------------------------------
     # events
@@ -367,23 +486,21 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         """
         for student in data.students:
             seen = self._seen_homework.setdefault(student.key, set())
-            if not data.homework_ok.get(student.key):
-                continue
-            for item in data.homework[student.key]:
-                ident = item.identity()
-                if ident in seen:
-                    continue
-                seen.add(ident)
-                if self._baseline_done:
-                    self.hass.bus.async_fire(
-                        EVENT_NEW_HOMEWORK,
-                        {
-                            "entry_id": self.config_entry.entry_id,
-                            "student": student.name,
-                            "student_key": student.key,
-                            **item.as_dict(),
-                        },
-                    )
+            if data.homework_ok.get(student.key):
+                for item in data.homework[student.key]:
+                    if self._first_sighting(seen, item.identity()):
+                        self._fire(EVENT_NEW_HOMEWORK, student, item.as_dict())
+            if data.grades_ok.get(student.key):
+                seen = self._seen_grades.setdefault(student.key, set())
+                for grade in data.grades[student.key]:
+                    if self._first_sighting(seen, grade.identity()):
+                        self._fire(EVENT_NEW_GRADE, student, grade.as_dict())
+            if data.calendar_ok.get(student.key):
+                seen = self._seen_tests.setdefault(student.key, set())
+                bell = data.bell.get(student.key, {})
+                for event in data.calendar[student.key]:
+                    if event.kind == "exam" and self._first_sighting(seen, event.identity()):
+                        self._fire(EVENT_NEW_TEST, student, event.as_dict(bell))
         for message in data.messages:
             ident = message.identity()
             if ident in self._seen_messages:
@@ -395,3 +512,21 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                     {"entry_id": self.config_entry.entry_id, **message.as_dict()},
                 )
         self._baseline_done = True
+
+    def _first_sighting(self, seen: set[str], identity: str) -> bool:
+        """Record an item; True when it is new and the baseline poll is behind us."""
+        if identity in seen:
+            return False
+        seen.add(identity)
+        return self._baseline_done
+
+    def _fire(self, event_type: str, student: Student, payload: dict[str, Any]) -> None:
+        self.hass.bus.async_fire(
+            event_type,
+            {
+                "entry_id": self.config_entry.entry_id,
+                "student": student.name,
+                "student_key": student.key,
+                **payload,
+            },
+        )

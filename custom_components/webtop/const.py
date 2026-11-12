@@ -34,6 +34,11 @@ MANUFACTURER = "SmartSchool"
 # the first successful poll of a running instance.
 EVENT_NEW_HOMEWORK = f"{DOMAIN}_new_homework"
 EVENT_NEW_MESSAGE = f"{DOMAIN}_new_message"
+EVENT_NEW_GRADE = f"{DOMAIN}_new_grade"
+EVENT_NEW_TEST = f"{DOMAIN}_new_test"
+
+# How far ahead the tests board is read, in months (the current month is always included).
+TESTS_BOARD_MONTHS_AHEAD = 1
 
 # Sensor attributes hold lists; keep them bounded so the recorder database
 # does not balloon.

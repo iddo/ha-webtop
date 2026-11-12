@@ -1,30 +1,36 @@
 """Sensor platform for the Webtop (SmartSchool) integration.
 
-Per student: homework due today, behaviour events, lessons today and class.
+Per student: the current lesson, next test, upcoming tests, latest grade,
+today's schedule changes, homework due today, behaviour events, lessons today
+and class.
 Per account: unread messages, last message and unread notifications. Lists
 live in attributes, since a sensor state is capped at 255 characters.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.util import dt as dt_util
 
 from .const import MAX_LIST_ATTR_ITEMS
 from .coordinator import WebtopConfigEntry, WebtopCoordinator, WebtopData
 from .entity import WebtopAccountEntity, WebtopStudentEntity
-from .models import Student
+from .models import SchoolEvent, Student
+from .timetable import Now, resolve
 
 
 def _today() -> str:
@@ -90,7 +96,95 @@ def _lessons_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
     }
 
 
+def _upcoming_exams(data: WebtopData, student: Student) -> list[SchoolEvent]:
+    today = dt_util.now().date()
+    return [e for e in data.calendar.get(student.key, []) if e.kind == "exam" and e.end_date >= today]
+
+
+def _next_test_value(data: WebtopData, student: Student) -> dt.date | None:
+    if not data.calendar_ok.get(student.key):
+        return None
+    exams = _upcoming_exams(data, student)
+    return exams[0].start_date if exams else None
+
+
+def _next_test_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
+    exams = _upcoming_exams(data, student)
+    if not exams:
+        return {}
+    bell = data.bell.get(student.key, {})
+    return {**exams[0].as_dict(bell), "days_until": (exams[0].start_date - dt_util.now().date()).days}
+
+
+def _upcoming_tests_value(data: WebtopData, student: Student) -> int | None:
+    if not data.calendar_ok.get(student.key):
+        return None
+    return len(_upcoming_exams(data, student))
+
+
+def _upcoming_tests_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
+    bell = data.bell.get(student.key, {})
+    return {"tests": [e.as_dict(bell) for e in _upcoming_exams(data, student)[:MAX_LIST_ATTR_ITEMS]]}
+
+
+def _latest_grade_value(data: WebtopData, student: Student) -> str | None:
+    grades = data.grades.get(student.key, [])
+    if not data.grades_ok.get(student.key) or not grades:
+        return None
+    return grades[0].grade[:255]
+
+
+def _latest_grade_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
+    grades = data.grades.get(student.key, [])
+    if not grades:
+        return {}
+    return {**grades[0].as_dict(), "recent": [g.as_dict() for g in grades[:MAX_LIST_ATTR_ITEMS]]}
+
+
+def _changes_value(data: WebtopData, student: Student) -> int | None:
+    if not data.changes_ok.get(student.key):
+        return None
+    return len(data.changes[student.key])
+
+
+def _changes_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
+    return {"changes": [c.as_dict() for c in data.changes.get(student.key, [])[:MAX_LIST_ATTR_ITEMS]]}
+
+
 STUDENT_SENSORS: tuple[StudentSensorDescription, ...] = (
+    StudentSensorDescription(
+        key="next_test",
+        translation_key="next_test",
+        icon="mdi:clipboard-text-clock",
+        device_class=SensorDeviceClass.DATE,
+        value_fn=_next_test_value,
+        attrs_fn=_next_test_attrs,
+    ),
+    StudentSensorDescription(
+        key="upcoming_tests",
+        translation_key="upcoming_tests",
+        icon="mdi:clipboard-list",
+        native_unit_of_measurement="tests",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=_upcoming_tests_value,
+        attrs_fn=_upcoming_tests_attrs,
+    ),
+    StudentSensorDescription(
+        key="latest_grade",
+        translation_key="latest_grade",
+        icon="mdi:school",
+        value_fn=_latest_grade_value,
+        attrs_fn=_latest_grade_attrs,
+    ),
+    StudentSensorDescription(
+        key="schedule_changes_today",
+        translation_key="schedule_changes_today",
+        icon="mdi:calendar-alert",
+        native_unit_of_measurement="changes",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=_changes_value,
+        attrs_fn=_changes_attrs,
+    ),
     StudentSensorDescription(
         key="homework_today",
         translation_key="homework_today",
@@ -159,6 +253,90 @@ class WebtopStudentSensor(WebtopStudentEntity, SensorEntity):
         if student is None or self.entity_description.attrs_fn is None:
             return None
         return self.entity_description.attrs_fn(self.coordinator.data, student)
+
+
+class WebtopCurrentLessonSensor(WebtopStudentEntity, SensorEntity):
+    """The lesson the student is in right now.
+
+    The state is the subject during a lesson, "Break" between lessons and
+    "No lesson" outside school hours, so the entity's history reads as the
+    day's timetable. It re-evaluates exactly when a lesson starts or ends,
+    not only when the portal is polled.
+    """
+
+    _attr_translation_key = "current_lesson"
+    _attr_icon = "mdi:human-male-board"
+
+    def __init__(self, coordinator: WebtopCoordinator, student: Student) -> None:
+        super().__init__(coordinator, student)
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{student.key}_current_lesson"
+        self._unsub_timer: CALLBACK_TYPE | None = None
+
+    def _resolve(self) -> Now | None:
+        data = self.coordinator.data
+        if not data.schedule_ok.get(self.student_key):
+            return None
+        return resolve(data.schedule[self.student_key], data.bell.get(self.student_key, {}), dt_util.now())
+
+    @property
+    def native_value(self) -> str | None:
+        now = self._resolve()
+        return now.state[:255] if now and now.state else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        now = self._resolve()
+        if now is None:
+            return None
+        current, upcoming = now.current, now.upcoming
+        return {
+            "teacher": current.teacher if current else None,
+            "room": current.room if current else None,
+            "hour": current.hour if current else None,
+            "start": current.start.isoformat() if current else None,
+            "end": current.end.isoformat() if current else None,
+            "changed": current.changed if current else None,
+            "next_subject": upcoming.subject if upcoming else None,
+            "next_start": upcoming.start.isoformat() if upcoming else None,
+            "lessons_today": now.lessons_today,
+            # False when the portal gave lessons but no lesson times to place them on the clock.
+            "times_known": now.state is not None,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._schedule_next_change()
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._cancel_timer()
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._schedule_next_change()
+        super()._handle_coordinator_update()
+
+    def _cancel_timer(self) -> None:
+        if self._unsub_timer is not None:
+            self._unsub_timer()
+            self._unsub_timer = None
+
+    @callback
+    def _schedule_next_change(self) -> None:
+        """Wake up at the next lesson boundary, or just after midnight."""
+        self._cancel_timer()
+        now = self._resolve()
+        when = now.next_change if now else None
+        if when is None:
+            tomorrow = dt_util.now().date() + dt.timedelta(days=1)
+            when = dt.datetime.combine(tomorrow, dt.time(0, 0, 5), dt_util.now().tzinfo)
+        self._unsub_timer = async_track_point_in_time(self.hass, self._on_boundary, when)
+
+    @callback
+    def _on_boundary(self, _now: dt.datetime) -> None:
+        self._unsub_timer = None
+        self.async_write_ha_state()
+        self._schedule_next_change()
 
 
 # ---------------------------------------------------------------------------
@@ -250,11 +428,11 @@ async def async_setup_entry(
         if not new:
             return
         known.update(s.key for s in new)
-        async_add_entities(
-            WebtopStudentSensor(coordinator, student, description)
-            for student in new
-            for description in STUDENT_SENSORS
-        )
+        entities: list[SensorEntity] = [WebtopCurrentLessonSensor(coordinator, student) for student in new]
+        entities += [
+            WebtopStudentSensor(coordinator, student, description) for student in new for description in STUDENT_SENSORS
+        ]
+        async_add_entities(entities)
 
     _add_new_students()
     # A child added to the account later gets entities without a reload.

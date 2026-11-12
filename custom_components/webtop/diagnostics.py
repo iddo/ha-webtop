@@ -37,6 +37,19 @@ TO_REDACT = {
     "sender",
     "teacher",
     "teacherName",
+    "teacherLastName",
+    "teacherFirstName",
+    "private_name",
+    "family_name",
+    "privateName",
+    "senderName",
+    "institutionCode",
+    "grade",
+    "numeric_grade",
+    "remark",
+    "note",
+    "content",
+    "homeworkData",
     "unique_id",
     "email",
     "phone",
@@ -71,11 +84,27 @@ async def async_get_config_entry_diagnostics(
                 "discipline_events": len(data.discipline.get(s.key, [])),
                 "schedule_ok": data.schedule_ok.get(s.key),
                 "lessons": len(data.schedule.get(s.key, [])),
+                "lessons_with_own_times": sum(1 for x in data.schedule.get(s.key, []) if x.start),
+                "lessons_with_weekday": sum(1 for x in data.schedule.get(s.key, []) if x.weekday is not None),
+                "bell_schedule_hours": sorted(data.bell.get(s.key, {})),
+                "calendar_ok": data.calendar_ok.get(s.key),
+                "calendar_items": {
+                    kind: sum(1 for e in data.calendar.get(s.key, []) if e.kind == kind)
+                    for kind in ("exam", "event", "vacation")
+                },
+                "grades_ok": data.grades_ok.get(s.key),
+                "grades": len(data.grades.get(s.key, [])),
+                "changes_ok": data.changes_ok.get(s.key),
+                "changes_today": len(data.changes.get(s.key, [])),
             }
             for s in data.students
         ],
         "messages": len(data.messages),
         "unread_notifications": data.unread_notifications,
         "last_update_success": coordinator.last_update_success,
-        "raw_samples": async_redact_data(data.raw_samples, TO_REDACT),
+        # Message subjects are written by people; lesson subjects elsewhere are not.
+        "raw_samples": {
+            name: async_redact_data(sample, TO_REDACT | ({"subject"} if name == "inbox" else set()))
+            for name, sample in data.raw_samples.items()
+        },
     }

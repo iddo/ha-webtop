@@ -27,6 +27,7 @@ LOGIN_DATA = {
     "schoolName": "בית ספר לדוגמה",
     "firstName": "דנה",
     "lastName": "לוי",
+    "institutionCode": 440099,
 }
 
 DASHBOARD = {
@@ -129,6 +130,83 @@ INBOX = {
 }
 
 NOTIFICATIONS = {"status": True, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
+
+# Shapes follow what the Webtop web client reads from these responses.
+TESTS_BOARD = {
+    "status": True,
+    "data": {
+        "hours": [
+            {"hour": 1, "fromTime": "08:00", "toTime": "08:45"},
+            {"hour": 2, "fromTime": "08:45", "toTime": "09:30"},
+            {"hour": 3, "fromTime": "09:50", "toTime": "10:35"},
+            {"hour": 4, "fromTime": "10:35", "toTime": "11:20"},
+        ],
+        "exams": [
+            {"title": "מבחן", "subject": "היסטוריה", "date": "2026-11-18T00:00:00", "fromHour": 2, "toHour": 4,
+             "classCode": 3, "classNumber": 2, "note": "פרקים 4-6"},
+            {"title": "בוחן", "subject": "אנגלית", "date": "2026-11-12T00:00:00", "fromHour": 1, "toHour": 2,
+             "classCode": 3, "classNumber": 2},
+            {"title": "מבחן", "subject": "מתמטיקה", "date": "2026-11-05T00:00:00", "fromHour": 1, "toHour": 3,
+             "classCode": 3, "classNumber": 2},
+            {"title": "מבחן", "subject": "מדעים", "date": "2026-11-25T00:00:00", "fromHour": 3, "toHour": 5,
+             "classCode": 6, "classNumber": 1},
+        ],
+        "events": [
+            {"title": "יום ספורט", "from_date": "2026-11-20T00:00:00", "to_date": "2026-11-20T00:00:00",
+             "from_hour": 1, "to_hour": 5, "typeID": 4, "classes": []},
+        ],
+        "vactications": [
+            {"title": "חופשת חנוכה", "from_date": "2026-12-15T00:00:00", "to_date": "2026-12-22T00:00:00"},
+        ],
+        "classes": [{"classCode": 3, "classNumber": 2, "itemId": "3|2"}],
+    },
+}  # fmt: skip
+
+GRADES = {
+    "status": True,
+    "data": {
+        "dataTable": [
+            {"subject": "אנגלית", "title": "בוחן אוצר מילים", "type": "בוחן", "date": "2026-10-20T00:00:00",
+             "grade": 78, "weight": 5, "teacherLastName": "לוי", "teacherFirstName": "דוד"},
+            {"subject": "מדעים", "title": "בוחן פתע", "type": "בוחן", "date": "2026-11-03T00:00:00",
+             "grade": 92, "weight": 10, "teacherLastName": "שפירא", "teacherFirstName": "נועה", "remark": "כל הכבוד"},
+        ]
+    },
+}  # fmt: skip
+
+CHANGES = {
+    "status": True,
+    "data": {
+        "allowToViewThis": True,
+        "messages": [],
+        "changes": [{"hour": 2, "content": "מילוי מקום", "lastName": "כהן", "privateName": "רחל", "room": "12"}],
+        "exams": [],
+        "events": [{"from_hour": 5, "title": "אסיפת שכבה"}],
+    },
+}
+
+REQUEST_DEFAULTS = {
+    "EventsTestsBoard": TESTS_BOARD,
+    "GetGrades": GRADES,
+    "ChangesAndMessagesDataForToday": CHANGES,
+    # Used by the capture tool, which calls every endpoint through request().
+    "InitDashboard": DASHBOARD,
+    "GetHomeWork": HOMEWORK_A,
+    "GetMessagesInbox": INBOX,
+    "GetPupilScheduale": SCHEDULE,
+    "GetPupilDiciplineEvents": DISCIPLINE,
+    "GetPreviewUnreadNotifications": NOTIFICATIONS,
+    "GetMultipleUsersForUser": {"status": True, "data": []},
+    "GetPupilPeriodGrades": {"status": False, "errorDescription": "view is blocked", "data": None},
+}
+
+
+class FakeResponse:
+    def __init__(self, body: Any) -> None:
+        self._body = body
+
+    def json(self) -> Any:
+        return self._body
 
 
 class Seq(list):
@@ -236,6 +314,12 @@ class FakeWebtopClient:
 
     async def get_preview_unread_notifications(self) -> Any:
         return self._answer("get_preview_unread_notifications", NOTIFICATIONS)
+
+    async def request(self, method: str, path: str, **kwargs: Any) -> FakeResponse:
+        """Endpoints pywebtop has no method for, keyed by the last path segment."""
+        name = path.rsplit("/", 1)[-1]
+        default = REQUEST_DEFAULTS.get(name, {"status": True, "data": None})
+        return FakeResponse(self._answer(name, default, path=path, **(kwargs.get("json") or {})))
 
 
 @pytest.fixture(autouse=True)

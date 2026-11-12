@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from .coordinator import WebtopConfigEntry, WebtopCoordinator
 from .entity import ensure_account_device
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.CALENDAR, Platform.SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: WebtopConfigEntry) -> bool:

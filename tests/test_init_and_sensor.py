@@ -46,7 +46,8 @@ async def test_setup_creates_devices_and_sensors(hass: HomeAssistant, fake_clien
     assert f"{config_entry.entry_id}_1001_homework_today" in unique_ids
     assert f"{config_entry.entry_id}_1002_lessons_today" in unique_ids
     assert f"{config_entry.entry_id}_unread_messages" in unique_ids
-    assert len(entries) == 3 + 2 * 4
+    # 3 account sensors, then per student 9 sensors and a calendar.
+    assert len(entries) == 3 + 2 * (9 + 1)
 
     # Account sensors
     unread = _state(hass, "sensor.webtop_dnh_lvy_unread_messages")

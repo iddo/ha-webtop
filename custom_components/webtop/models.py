@@ -12,7 +12,9 @@ candidate keys rather than failing.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -96,6 +98,52 @@ def _digest(*parts: str) -> str:
 
 def normalize_name(name: str | None) -> str:
     return " ".join((name or "").split()).casefold()
+
+
+_TIME_IN_TEXT_RE = re.compile(r"(?:^|[T ])(\d{1,2})[:.](\d{2})(?::\d{2})?")
+
+
+def parse_time(value: Any) -> dt.time | None:
+    """Parse "8:00", "08:00:00" or an ISO timestamp into a time of day."""
+    if isinstance(value, dt.datetime):
+        return value.time().replace(second=0, microsecond=0)
+    if isinstance(value, dt.time):
+        return value
+    if not isinstance(value, str):
+        return None
+    match = _TIME_IN_TEXT_RE.search(value.strip())
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return dt.time(hour, minute)
+
+
+def format_time(value: Any) -> str:
+    parsed = parse_time(value)
+    return parsed.strftime("%H:%M") if parsed else ""
+
+
+def parse_date(value: Any) -> dt.date | None:
+    """Parse the date part of "2026-11-18T00:00:00" or "18/11/2026"."""
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    iso = re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
+    try:
+        if iso:
+            return dt.date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        local = re.match(r"(\d{1,2})[/.](\d{1,2})[/.](\d{4})", text)
+        if local:
+            return dt.date(int(local.group(3)), int(local.group(2)), int(local.group(1)))
+    except ValueError:
+        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +473,11 @@ class Lesson:
     room: str = ""
     homework: str = ""
     changed: bool = False
+    # Webtop weekday (1 = Sunday ... 7 = Saturday) for timetables keyed by day instead of date.
+    weekday: int | None = None
+    # "HH:MM" when the lesson row carries its own times; otherwise the bell schedule supplies them.
+    start: str = ""
+    end: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -435,9 +488,14 @@ class Lesson:
             "room": self.room,
             "homework": self.homework,
             "changed": self.changed,
+            "start": self.start,
+            "end": self.end,
         }
 
 
+_WEEKDAY_KEYS = ("day", "dayIndex", "dayOfWeek", "dayNum", "weekDay")
+_START_TIME_KEYS = ("fromTime", "startTime", "from_time", "start_time", "timeFrom")
+_END_TIME_KEYS = ("toTime", "endTime", "to_time", "end_time", "timeTo")
 _SUBJECT_KEYS = ("subject_name", "subjectName", "subject", "lesson", "lessonSubject", "Subject")
 _HOUR_KEYS = ("hourNum", "hour", "hourNumber", "lessonNum", "HourNum")
 
@@ -452,12 +510,15 @@ def parse_schedule(data: Any) -> list[Lesson]:
     """
     lessons: list[Lesson] = []
 
-    def walk(node: Any, date: str, hour: int | None) -> None:
+    def walk(node: Any, date: str, hour: int | None, weekday: int | None) -> None:
         if isinstance(node, dict):
             own_date = _pick_text(node, *_DATE_KEYS) or date
             own_hour = _as_int(_pick(node, *_HOUR_KEYS))
             if own_hour is None:
                 own_hour = hour
+            own_weekday = _as_int(_pick(node, *_WEEKDAY_KEYS))
+            if own_weekday is None:
+                own_weekday = weekday
             subject = _pick_text(node, *_SUBJECT_KEYS)
             if subject:
                 lessons.append(
@@ -469,16 +530,19 @@ def parse_schedule(data: Any) -> list[Lesson]:
                         room=_pick_text(node, "room", "roomName", "className", "classRoom"),
                         homework=_pick_text(node, "homeWork", "homework", "homeworkData"),
                         changed=_as_bool(_pick(node, "isChanged", "changed", "hasChange", "isSubstitute")),
+                        weekday=own_weekday,
+                        start=format_time(_pick(node, *_START_TIME_KEYS)),
+                        end=format_time(_pick(node, *_END_TIME_KEYS)),
                     )
                 )
             for value in node.values():
                 if isinstance(value, (dict, list)):
-                    walk(value, own_date, own_hour)
+                    walk(value, own_date, own_hour, own_weekday)
         elif isinstance(node, list):
             for item in node:
-                walk(item, date, hour)
+                walk(item, date, hour, weekday)
 
-    walk(data, "", None)
+    walk(data, "", None, None)
     return lessons
 
 
@@ -500,3 +564,258 @@ def parse_unread_count(data: Any) -> int | None:
     if isinstance(data, (int, float)) and not isinstance(data, bool):
         return int(data)
     return None
+
+
+# ---------------------------------------------------------------------------
+# bell schedule, tests board, grades, daily changes
+# ---------------------------------------------------------------------------
+# Lesson number -> (start, end). Comes with the tests board as ``data.hours``.
+BellSchedule = dict[int, tuple[dt.time, dt.time]]
+
+
+def parse_bell_schedule(data: Any) -> BellSchedule:
+    """Find ``[{hour, fromTime, toTime}]`` anywhere near the top of a payload."""
+    candidates: list[Any] = []
+    if isinstance(data, dict):
+        candidates = [data.get(k) for k in ("hours", "hoursList", "hourSettings", "allHours")]
+        candidates += [v for v in data.values() if isinstance(v, list)]
+    elif isinstance(data, list):
+        candidates = [data]
+    for rows in candidates:
+        if not isinstance(rows, list):
+            continue
+        bell: BellSchedule = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            hour = _as_int(_pick(row, *_HOUR_KEYS))
+            start = parse_time(_pick(row, *_START_TIME_KEYS))
+            end = parse_time(_pick(row, *_END_TIME_KEYS))
+            if hour is not None and start and end and start < end:
+                bell[hour] = (start, end)
+        if bell:
+            return bell
+    return {}
+
+
+@dataclass
+class SchoolEvent:
+    """An exam, school event or vacation from ``shotef/EventsTestsBoard``."""
+
+    kind: str  # "exam" | "event" | "vacation"
+    title: str
+    start_date: dt.date
+    end_date: dt.date
+    subject: str = ""
+    from_hour: int | None = None
+    to_hour: int | None = None
+    note: str = ""
+    # (class code, class number) pairs the item is for; empty means the whole school.
+    classes: tuple[tuple[int | None, int | None], ...] = ()
+
+    def identity(self) -> str:
+        return _digest(self.kind, self.title, self.subject, self.start_date.isoformat(), str(self.from_hour))
+
+    def applies_to(self, student: Student) -> bool:
+        if not self.classes or student.class_code is None:
+            return True
+        for code, number in self.classes:
+            if code == student.class_code and (number is None or number == student.class_number):
+                return True
+        return False
+
+    def times(self, bell: BellSchedule) -> tuple[dt.time, dt.time] | None:
+        """Start and end time of day, when lesson numbers and a bell schedule are known."""
+        if self.from_hour is None or self.from_hour not in bell:
+            return None
+        start = bell[self.from_hour][0]
+        # The client treats ``to_hour`` as exclusive (it looks up ``to_hour - 1``).
+        last = self.to_hour - 1 if self.to_hour is not None and self.to_hour > self.from_hour else self.from_hour
+        end = bell.get(last, bell[self.from_hour])[1]
+        return (start, end) if start < end else None
+
+    def as_dict(self, bell: BellSchedule | None = None) -> dict[str, Any]:
+        times = self.times(bell or {})
+        return {
+            "kind": self.kind,
+            "title": self.title,
+            "subject": self.subject,
+            "date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat(),
+            "from_hour": self.from_hour,
+            "to_hour": self.to_hour,
+            "start": times[0].strftime("%H:%M") if times else "",
+            "end": times[1].strftime("%H:%M") if times else "",
+            "note": self.note,
+        }
+
+
+_EVENT_START_KEYS = ("date", "examDate", "eventDate", "from_date", "fromDate", "startDate", "start_date")
+_EVENT_END_KEYS = ("to_date", "toDate", "endDate", "end_date")
+_FROM_HOUR_KEYS = ("fromHour", "from_hour", "startHour", "hour", "hourNum")
+_TO_HOUR_KEYS = ("toHour", "to_hour", "endHour")
+_BOARD_LISTS = (("exams", "exam"), ("events", "event"), ("vactications", "vacation"), ("vacations", "vacation"))
+
+
+def _classes_of(row: dict[str, Any]) -> tuple[tuple[int | None, int | None], ...]:
+    pairs: list[tuple[int | None, int | None]] = []
+    own_code = _as_int(_pick(row, "classCode", "class_Code", "ClassCode"))
+    if own_code is not None:
+        pairs.append((own_code, _as_int(_pick(row, "classNumber", "classNum", "class_Num", "ClassNumber"))))
+    listed = _pick(row, "classes", "classesList")
+    if isinstance(listed, list):
+        for item in listed:
+            if isinstance(item, dict):
+                code = _as_int(_pick(item, "classCode", "class_Code", "ClassCode"))
+                if code is not None:
+                    pairs.append((code, _as_int(_pick(item, "classNumber", "classNum", "class_Num", "ClassNumber"))))
+            elif isinstance(item, str) and "|" in item:
+                code, _, number = item.partition("|")
+                pairs.append((_as_int(code), _as_int(number)))
+    return tuple(dict.fromkeys(pairs))
+
+
+def parse_tests_board(data: Any) -> list[SchoolEvent]:
+    """Exams, events and vacations from an ``EventsTestsBoard`` payload."""
+    if not isinstance(data, dict):
+        return []
+    found: list[SchoolEvent] = []
+    for key, kind in _BOARD_LISTS:
+        rows = data.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            start = parse_date(_pick(row, *_EVENT_START_KEYS))
+            if start is None:
+                continue
+            end = parse_date(_pick(row, *_EVENT_END_KEYS)) or start
+            subject = _pick_text(row, "subject", "subjectName", "subject_name", "lesson", "profession")
+            title = _pick_text(row, "title", "name", "eventName", "content", "description", "type") or subject
+            found.append(
+                SchoolEvent(
+                    kind=kind,
+                    title=title or kind,
+                    start_date=start,
+                    end_date=max(start, end),
+                    subject=subject,
+                    from_hour=_as_int(_pick(row, *_FROM_HOUR_KEYS)),
+                    to_hour=_as_int(_pick(row, *_TO_HOUR_KEYS)),
+                    note=_pick_text(row, "note", "remark", "remarks", "comment", "details"),
+                    classes=_classes_of(row),
+                )
+            )
+    found.sort(key=lambda e: (e.start_date, e.from_hour if e.from_hour is not None else 99))
+    return found
+
+
+@dataclass
+class Grade:
+    """A mark from ``dashboard/GetGrades`` (latest) or ``PupilCard/GetPupilGrades``."""
+
+    subject: str
+    grade: str
+    title: str = ""
+    type: str = ""
+    date: str = ""
+    weight: str = ""
+    teacher: str = ""
+    remark: str = ""
+
+    def identity(self) -> str:
+        return _digest(self.subject, self.title, self.date[:10], self.grade)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "subject": self.subject,
+            "grade": self.grade,
+            "title": self.title,
+            "type": self.type,
+            "date": self.date,
+            "weight": self.weight,
+            "teacher": self.teacher,
+            "remark": self.remark,
+        }
+
+
+def parse_grades(data: Any) -> list[Grade]:
+    """Newest first."""
+    grades: list[Grade] = []
+    for row in _row_list(data):
+        subject = _pick_text(row, "subject", "subjectName", "subject_name", "lesson")
+        value = _pick_text(row, "grade", "numeric_grade", "numGrade", "mark", "assessment", "textGrade")
+        if not subject or not value:
+            continue
+        last = _pick_text(row, "teacherLastName", "family_name")
+        first = _pick_text(row, "teacherFirstName", "private_name")
+        grades.append(
+            Grade(
+                subject=subject,
+                grade=value,
+                title=_pick_text(row, "title", "eventName", "name", "gradeTitle"),
+                type=_pick_text(row, "type", "gradeType", "eventType"),
+                date=_pick_text(row, "date", "gradeDate", "eventDate"),
+                weight=_pick_text(row, "weight", "percent"),
+                teacher=f"{last} {first}".strip() or _pick_text(row, "teacher", "teacherName"),
+                remark=_pick_text(row, "remark", "remarks", "comment", "note"),
+            )
+        )
+    grades.sort(key=lambda g: g.date, reverse=True)
+    return grades
+
+
+@dataclass
+class ScheduleChange:
+    """One row of today's changes board: a substitution, cancellation, exam, event or notice."""
+
+    kind: str  # "change" | "message" | "exam" | "event"
+    text: str
+    hour: int | None = None
+    teacher: str = ""
+    room: str = ""
+    note: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "text": self.text,
+            "hour": self.hour,
+            "teacher": self.teacher,
+            "room": self.room,
+            "note": self.note,
+        }
+
+
+_CHANGE_LISTS = (("changes", "change"), ("messages", "message"), ("exams", "exam"), ("events", "event"))
+
+
+def parse_changes(data: Any) -> list[ScheduleChange]:
+    """Rows of ``ChangesAndMessagesDataForToday``, ordered by lesson number."""
+    if not isinstance(data, dict):
+        return []
+    rows_out: list[ScheduleChange] = []
+    for key, kind in _CHANGE_LISTS:
+        rows = data.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            last = _pick_text(row, "lastName", "teacherLastName")
+            first = _pick_text(row, "privateName", "firstName", "teacherFirstName")
+            text = _pick_text(
+                row, "content", "title", "message", "text", "subject", "subject_name", "name", "changeType", "type"
+            )
+            rows_out.append(
+                ScheduleChange(
+                    kind=kind,
+                    text=text or kind,
+                    hour=_as_int(_pick(row, "hour", "from_hour", "fromHour", "hourNum")),
+                    teacher=f"{last} {first}".strip() or _pick_text(row, "teacher", "teacherName"),
+                    room=_pick_text(row, "room", "roomName"),
+                    note=_pick_text(row, "note", "remark", "remarks"),
+                )
+            )
+    rows_out.sort(key=lambda c: c.hour if c.hour is not None else 99)
+    return rows_out
