@@ -205,7 +205,7 @@ async def test_relogin_failure_becomes_reauth(
 
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     assert _state(hass, "sensor.nv_m_lvy_homework_today").state == "unavailable"
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
@@ -221,14 +221,14 @@ async def test_server_error_marks_unavailable_then_recovers(
 
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert _state(hass, "sensor.webtop_dnh_lvy_unread_messages").state == "unavailable"
     assert len(fake_client.created) == 1  # a 500 is not a session problem
 
     client.responses.pop("get_messages_inbox")
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert _state(hass, "sensor.webtop_dnh_lvy_unread_messages").state == "1"
 
 
@@ -385,7 +385,7 @@ async def test_next_poll_switches_back_to_the_first_school(
     await _setup(hass, config_entry)
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     switches = [c[1]["student_id"] for c in fake_client.created[0].calls if c[0] == "switch_student"]
     assert switches == ["enc-login-b==", LOGIN_DATA["id"], "enc-login-b=="]
 
@@ -418,7 +418,7 @@ async def test_new_student_gets_entities_without_reload(
     fake_client.created[0].responses["get_students"] = DASHBOARD
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert _state(hass, "sensor.myh_lvy_homework_today").state == "0"
 
 
@@ -448,7 +448,7 @@ async def test_events_fire_only_for_new_items_after_baseline(
     }
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     # Student A already had two homework items in the baseline; B had none, so B gets all three.
     assert sorted((e.data["student"], e.data["subject"], e.data["date"]) for e in homework_events) == [
@@ -467,7 +467,7 @@ async def test_events_fire_only_for_new_items_after_baseline(
     # Nothing new on the next poll: no further events.
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert (len(homework_events), len(message_events), len(behaviour_events)) == (4, 1, 2)
 
 

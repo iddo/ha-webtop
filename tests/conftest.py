@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
@@ -510,6 +511,9 @@ def fake_client() -> Generator[FakeWebtopClient]:
         # The real client loads TLS certificates from disk when constructed,
         # so it must never be built on the event-loop thread.
         built_on_loop_thread.append(threading.current_thread() is loop_thread)
+        # ...and loading them takes real time. Without this pause the tests only catch
+        # "asserted before the background poll finished" on a slow CI runner.
+        time.sleep(0.02)
         client = FakeWebtopClient(**kwargs)
         client.responses = factory.responses  # type: ignore[attr-defined]
         created.append(client)

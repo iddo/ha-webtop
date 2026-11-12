@@ -31,7 +31,7 @@ async def _setup(hass: HomeAssistant, config_entry) -> None:
 async def _go_to(hass: HomeAssistant, freezer: FrozenDateTimeFactory, local: str) -> None:
     freezer.move_to(f"2026-11-10 {local}+02:00")
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 async def test_current_lesson_follows_the_clock_between_polls(
@@ -78,7 +78,7 @@ async def test_current_lesson_rolls_over_at_midnight(
 
     freezer.move_to("2026-11-11 00:00:06+02:00")
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     state = hass.states.get(LESSON)
     assert state.attributes["lessons_today"] == 1
     assert state.attributes["next_subject"] == "מדעים"
@@ -104,7 +104,7 @@ async def test_lesson_times_fall_back_to_the_weekly_schedule(
     # Neither lookup is repeated on later polls the same day.
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert len([c for c in client.calls if c[0] == "EventsTestsBoard"]) == 1
     assert len([c for c in client.calls if c[0] == "WeeklySchedualeForToday"]) == 2
     assert hass.states.get(LESSON).state == "מתמטיקה"
@@ -248,7 +248,7 @@ async def test_new_grade_and_new_test_events(
 
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     assert sorted((e.data["student"], e.data["subject"], e.data["grade"]) for e in grade_events) == [
         ("מאיה לוי", "היסטוריה", "95"),
@@ -262,7 +262,7 @@ async def test_new_grade_and_new_test_events(
 
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert len(grade_events) == 2 and len(test_events) == 1
 
 
