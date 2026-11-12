@@ -7,10 +7,10 @@
         "data": {
           "username": "Username",
           "password": "Password",
-          "data": "Login data token"
+          "data": "Login data override (advanced)"
         },
         "data_description": {
-          "data": "The opaque 'Data' value the Webtop web client sends on login. Leave the default unless logins fail."
+          "data": "Leave empty. The integration computes the 'Data' value of the login request from your username. Fill this in only to force a value captured from the browser."
         }
       },
       "reauth_confirm": {
@@ -18,13 +18,15 @@
         "description": "Enter the current password for {username}.",
         "data": {
           "password": "Password",
-          "data": "Login data token"
+          "data": "Login data override (advanced)"
         }
       }
     },
     "error": {
       "cannot_connect": "Could not reach the Webtop server. Check the connection and try again.",
-      "invalid_auth": "Webtop rejected the username or password. If the portal shows a captcha on login, password logins may be blocked for this school.",
+      "invalid_auth": "Webtop rejected the login. Check the username and password by signing in at webtop.smartschool.co.il.",
+      "captcha_required": "Webtop is asking for a captcha before it accepts a password login from this network. Sign in once in a browser, wait a while, then try again.",
+      "too_many_attempts": "Webtop locked this account after too many failed attempts. Wait, or reset the password on the portal.",
       "unknown": "Unexpected error; see the Home Assistant log."
     },
     "abort": {
@@ -48,13 +50,27 @@
   },
   "entity": {
     "sensor": {
-      "homework_today": { "name": "Homework today" },
-      "behaviour_events": { "name": "Behaviour events" },
-      "lessons_today": { "name": "Lessons today" },
-      "class": { "name": "Class" },
-      "unread_messages": { "name": "Unread messages" },
-      "last_message": { "name": "Last message" },
-      "unread_notifications": { "name": "Unread notifications" }
+      "homework_today": {
+        "name": "Homework today"
+      },
+      "behaviour_events": {
+        "name": "Behaviour events"
+      },
+      "lessons_today": {
+        "name": "Lessons today"
+      },
+      "class": {
+        "name": "Class"
+      },
+      "unread_messages": {
+        "name": "Unread messages"
+      },
+      "last_message": {
+        "name": "Last message"
+      },
+      "unread_notifications": {
+        "name": "Unread notifications"
+      }
     }
   }
 }

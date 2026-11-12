@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -12,6 +13,7 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_capture_events, async_fire_time_changed
 from webtop import WebtopLoginError, WebtopRequestError
 
+from custom_components.webtop.auth import compute_login_data
 from custom_components.webtop.const import DOMAIN, EVENT_NEW_HOMEWORK, EVENT_NEW_MESSAGE
 from custom_components.webtop.diagnostics import async_get_config_entry_diagnostics
 
@@ -100,6 +102,32 @@ async def test_setup_bad_credentials_starts_reauth(hass: HomeAssistant, fake_cli
     assert fake_client.created[0].closed is True
 
 
+@pytest.mark.parametrize("description", ["CaptchaRequired", "MoreThan5Retries"])
+async def test_setup_captcha_or_lockout_starts_reauth(
+    hass: HomeAssistant, fake_client, config_entry, description: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_client.responses["login"] = WebtopLoginError(
+        f"Login returned status=false. errorDescription={description!r}, errorId=None"
+    )
+    config_entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert config_entry.state is ConfigEntryState.SETUP_ERROR
+    assert ("captcha" in caplog.text) is (description == "CaptchaRequired")
+    assert ("too many attempts" in caplog.text) is (description == "MoreThan5Retries")
+
+
+async def test_client_is_built_off_the_event_loop_with_computed_data(
+    hass: HomeAssistant, fake_client, config_entry
+) -> None:
+    fake_client.counter.return_value = 2
+    await _setup(hass, config_entry)
+    assert fake_client.built_on_loop_thread == [False]
+    client = fake_client.created[0]
+    assert client.data == compute_login_data("parent", 2)
+    assert client.auto_login is False
+
+
 async def test_setup_timeout_retries(hass: HomeAssistant, fake_client, config_entry) -> None:
     fake_client.responses["login"] = WebtopLoginError("Login request timed out: x")
     config_entry.add_to_hass(hass)
@@ -115,8 +143,10 @@ async def test_expired_session_triggers_single_relogin(
     fake_client.responses["get_students"] = Seq([unauthorized, DASHBOARD])
     await _setup(hass, config_entry)
     assert config_entry.state is ConfigEntryState.LOADED
-    client = fake_client.created[0]
-    assert client.login_count == 2
+    # A rejected session is replaced by a brand new client and login.
+    first, second = fake_client.created
+    assert first.closed is True and second.closed is False
+    assert (first.login_count, second.login_count) == (1, 1)
     assert _state(hass, "sensor.nv_m_lvy_homework_today").state == "1"
 
 
@@ -126,7 +156,7 @@ async def test_status_false_without_text_is_treated_as_expired(hass: HomeAssista
     )
     await _setup(hass, config_entry)
     assert config_entry.state is ConfigEntryState.LOADED
-    assert fake_client.created[0].login_count == 2
+    assert len(fake_client.created) == 2
 
 
 async def test_relogin_failure_becomes_reauth(
@@ -157,7 +187,7 @@ async def test_server_error_marks_unavailable_then_recovers(
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert _state(hass, "sensor.webtop_dnh_lvy_unread_messages").state == "unavailable"
-    assert client.login_count == 1  # a 500 is not a session problem
+    assert len(fake_client.created) == 1  # a 500 is not a session problem
 
     client.responses.pop("get_messages_inbox")
     freezer.tick(timedelta(minutes=31))

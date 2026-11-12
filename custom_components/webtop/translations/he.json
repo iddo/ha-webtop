@@ -7,10 +7,10 @@
         "data": {
           "username": "שם משתמש",
           "password": "סיסמה",
-          "data": "ערך Data להתחברות"
+          "data": "ערך Data ידני (מתקדם)"
         },
         "data_description": {
-          "data": "הערך האטום 'Data' שאתר Webtop שולח בהתחברות. השאירו את ברירת המחדל אלא אם ההתחברות נכשלת."
+          "data": "השאירו ריק. האינטגרציה מחשבת את ערך ה-Data של בקשת ההתחברות משם המשתמש. מלאו רק כדי לכפות ערך שנלכד מהדפדפן."
         }
       },
       "reauth_confirm": {
@@ -18,13 +18,15 @@
         "description": "הזינו את הסיסמה הנוכחית עבור {username}.",
         "data": {
           "password": "סיסמה",
-          "data": "ערך Data להתחברות"
+          "data": "ערך Data ידני (מתקדם)"
         }
       }
     },
     "error": {
       "cannot_connect": "לא ניתן להגיע לשרת Webtop. בדקו את החיבור ונסו שוב.",
-      "invalid_auth": "Webtop דחה את שם המשתמש או הסיסמה. אם הפורטל מציג captcha בהתחברות, ייתכן שהתחברות בסיסמה חסומה לבית הספר הזה.",
+      "invalid_auth": "Webtop דחה את ההתחברות. בדקו את שם המשתמש והסיסמה בכניסה ל-webtop.smartschool.co.il.",
+      "captcha_required": "Webtop דורש captcha לפני התחברות בסיסמה מהרשת הזו. התחברו פעם אחת בדפדפן, המתינו מעט ונסו שוב.",
+      "too_many_attempts": "Webtop נעל את החשבון לאחר יותר מדי ניסיונות כושלים. המתינו או אפסו את הסיסמה בפורטל.",
       "unknown": "שגיאה לא צפויה; ראו את יומן Home Assistant."
     },
     "abort": {
@@ -48,13 +50,27 @@
   },
   "entity": {
     "sensor": {
-      "homework_today": { "name": "שיעורי בית להיום" },
-      "behaviour_events": { "name": "אירועי משמעת" },
-      "lessons_today": { "name": "שיעורים היום" },
-      "class": { "name": "כיתה" },
-      "unread_messages": { "name": "הודעות שלא נקראו" },
-      "last_message": { "name": "הודעה אחרונה" },
-      "unread_notifications": { "name": "התראות שלא נקראו" }
+      "homework_today": {
+        "name": "שיעורי בית להיום"
+      },
+      "behaviour_events": {
+        "name": "אירועי משמעת"
+      },
+      "lessons_today": {
+        "name": "שיעורים היום"
+      },
+      "class": {
+        "name": "כיתה"
+      },
+      "unread_messages": {
+        "name": "הודעות שלא נקראו"
+      },
+      "last_message": {
+        "name": "הודעה אחרונה"
+      },
+      "unread_notifications": {
+        "name": "התראות שלא נקראו"
+      }
     }
   }
 }

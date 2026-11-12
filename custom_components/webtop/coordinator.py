@@ -22,17 +22,16 @@ from homeassistant.util import dt as dt_util
 
 from webtop import WebtopClient, WebtopError, WebtopLoginError, WebtopRequestError
 
+from .auth import async_create_client, login_failure_reason
 from .const import (
     CONF_DATA,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
-    DEFAULT_DATA,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     EVENT_NEW_HOMEWORK,
     EVENT_NEW_MESSAGE,
-    REQUEST_TIMEOUT,
 )
 from .models import (
     DisciplineEvent,
@@ -56,7 +55,6 @@ _T = TypeVar("_T")
 
 # pywebtop folds the HTTP status into the exception text: "POST /x failed (401): ...".
 _HTTP_STATUS_RE = re.compile(r"\((\d{3})\)")
-_TRANSIENT_LOGIN_MARKERS = ("timed out", "request failed", "not json", "login failed (5")
 
 
 def is_auth_error(err: Exception) -> bool:
@@ -69,12 +67,6 @@ def is_auth_error(err: Exception) -> bool:
         match = _HTTP_STATUS_RE.search(str(err))
         return bool(match) and match.group(1) in ("401", "403")
     return False
-
-
-def is_transient_login_error(err: WebtopLoginError) -> bool:
-    """pywebtop raises WebtopLoginError for timeouts too; those are not bad credentials."""
-    text = str(err).casefold()
-    return any(marker in text for marker in _TRANSIENT_LOGIN_MARKERS)
 
 
 def school_year_for(now) -> int:
@@ -137,25 +129,47 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                 minutes=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
             ),
         )
-        self.client = WebtopClient(
-            username=entry.data[CONF_USERNAME],
-            password=entry.data[CONF_PASSWORD],
-            data=entry.data.get(CONF_DATA, DEFAULT_DATA),
-            timeout=REQUEST_TIMEOUT,
-            auto_login=False,
-        )
+        # Built on first use: creating it loads TLS certificates from disk, and
+        # its login "Data" depends on a counter fetched from the server.
+        self._client: WebtopClient | None = None
         self._seen_homework: dict[str, set[str]] = {}
         self._seen_messages: set[str] = set()
         self._baseline_done = False
         # Device-registry id of the account device; set once the first poll succeeds.
         self.account_device_id: str | None = None
 
+    @property
+    def client(self) -> WebtopClient:
+        if self._client is None:
+            raise WebtopLoginError("Not logged in")
+        return self._client
+
     async def async_close(self) -> None:
         """Close the underlying HTTP client."""
+        client, self._client = self._client, None
+        if client is None:
+            return
         try:
-            await self.client.close()
+            await client.close()
         except Exception:
             _LOGGER.debug("Closing the Webtop client failed", exc_info=True)
+
+    async def _async_login(self) -> None:
+        """Start a fresh session: new client, new login."""
+        await self.async_close()
+        entry = self.config_entry
+        client = await async_create_client(
+            self.hass,
+            entry.data[CONF_USERNAME],
+            entry.data[CONF_PASSWORD],
+            entry.data.get(CONF_DATA),
+        )
+        try:
+            await client.login()
+        except BaseException:
+            await client.close()
+            raise
+        self._client = client
 
     # ------------------------------------------------------------------
     # update
@@ -164,8 +178,15 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         try:
             data = await self._fetch_with_relogin()
         except WebtopLoginError as err:
-            if is_transient_login_error(err):
+            reason = login_failure_reason(err)
+            if reason == "cannot_connect":
                 raise UpdateFailed(f"Webtop login did not complete: {err}") from err
+            if reason == "captcha_required":
+                raise ConfigEntryAuthFailed(
+                    "Webtop demands a captcha for this login; sign in once in a browser, then re-authenticate"
+                ) from err
+            if reason == "too_many_attempts":
+                raise ConfigEntryAuthFailed("Webtop locked the account after too many attempts") from err
             raise ConfigEntryAuthFailed("Webtop rejected the credentials") from err
         except (WebtopError, WebtopApiError) as err:
             raise UpdateFailed(f"Webtop request failed: {err}") from err
@@ -175,15 +196,15 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
 
     async def _fetch_with_relogin(self) -> WebtopData:
         """Fetch everything; on a rejected session log in once more and retry."""
-        if not self.client.is_logged_in:
-            await self.client.login()
+        if self._client is None or not self._client.is_logged_in:
+            await self._async_login()
         try:
             return await self._collect()
         except (WebtopRequestError, WebtopApiError) as err:
             if not is_auth_error(err):
                 raise
             _LOGGER.debug("Webtop session was rejected (%s); logging in again", err)
-            await self.client.login()
+            await self._async_login()
             return await self._collect()
 
     async def _optional(

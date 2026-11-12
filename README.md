@@ -65,7 +65,7 @@ Settings → Devices & services → **Add integration** → *Webtop (SmartSchool
 | Field | Meaning |
 | --- | --- |
 | Username / Password | Your Webtop portal credentials. |
-| Login data token | The opaque `Data` value the Webtop web client sends on login. pywebtop ships a default that works for SmartSchool Israel; change it only if logins fail. |
+| Login data override (advanced) | Leave empty. The login request carries a `Data` value derived from your username; the integration computes it the same way the Webtop web client does. Fill this in only to force a value captured from the browser. |
 
 Options (⋮ → *Configure*): the polling interval in minutes (default 30,
 minimum 10). Each poll is a handful of requests per student; keep it polite.
@@ -76,14 +76,19 @@ integrations page.
 
 ## Known limitations
 
-- **Password login may be captcha-gated for some schools.** Another
-  project ([Shanksg/smartschool-webtop](https://github.com/Shanksg/smartschool-webtop))
-  reports that `LoginByUserNameAndPassword` is protected by a reCAPTCHA on
-  their account and only works from a browser. pywebtop's own examples log
-  in with username, password and the `Data` value, so it works for at least
-  some accounts. If setup fails with "rejected the username or password"
-  while the portal itself shows a captcha on login, this integration will not
-  be able to sign in for that school.
+- **Password login can be refused by the portal's bot protection.** The
+  Webtop login page runs a Cloudflare Turnstile check and, after failed
+  attempts from a network, demands a visible captcha. This integration cannot
+  and will not solve or sidestep that. When the server answers
+  `CaptchaRequired` the setup form says so; sign in once in a browser from
+  the same network, wait, and try again. A plain "rejected the login" means
+  the server gave no reason, which is also what a wrong password looks like.
+  [Shanksg/smartschool-webtop](https://github.com/Shanksg/smartschool-webtop)
+  reports password login blocked outright on their account and uses a
+  browser-captured token instead.
+- **pywebtop's built-in `Data` default is not used.** It is the value for one
+  particular username. The integration computes `Data` per login from the
+  username and the server's login counter (see `auth.py`).
 - **Response shapes are only partly documented.** Homework, messages and
   student discovery follow payloads other projects have published. The
   timetable, behaviour-event and notification parsers are tolerant and

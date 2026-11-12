@@ -11,10 +11,13 @@ LIBRARY_LOGGER = "webtop"
 # Config-entry data keys.
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
-# The opaque "Data" blob the Webtop web client sends with every password
-# login. pywebtop ships a default that works for SmartSchool Israel.
+# Optional override for the "Data" field of the login request. Left empty, the
+# integration computes it from the username (see auth.py).
 CONF_DATA = "data"
-DEFAULT_DATA = "+Aabe7FAdVluG6Lu+0ibrA=="
+DEFAULT_DATA = ""
+# pywebtop's built-in default, which earlier versions of this integration
+# stored. It is only valid for one username, so it is treated as "not set".
+LEGACY_DEFAULT_DATA = "+Aabe7FAdVluG6Lu+0ibrA=="
 
 # Options.
 CONF_SCAN_INTERVAL = "scan_interval"  # minutes

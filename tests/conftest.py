@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from freezegun.api import FrozenDateTimeFactory
@@ -257,8 +258,13 @@ def frozen_clock(freezer: FrozenDateTimeFactory) -> FrozenDateTimeFactory:
 def fake_client() -> Generator[FakeWebtopClient]:
     """Patch pywebtop's client in both places the integration imports it."""
     created: list[FakeWebtopClient] = []
+    built_on_loop_thread: list[bool] = []
+    loop_thread = threading.current_thread()
 
     def factory(**kwargs: Any) -> FakeWebtopClient:
+        # The real client loads TLS certificates from disk when constructed,
+        # so it must never be built on the event-loop thread.
+        built_on_loop_thread.append(threading.current_thread() is loop_thread)
         client = FakeWebtopClient(**kwargs)
         client.responses = factory.responses  # type: ignore[attr-defined]
         created.append(client)
@@ -266,12 +272,18 @@ def fake_client() -> Generator[FakeWebtopClient]:
 
     factory.responses = {}  # type: ignore[attr-defined]
     with (
-        patch("custom_components.webtop.coordinator.WebtopClient", side_effect=factory),
-        patch("custom_components.webtop.config_flow.WebtopClient", side_effect=factory),
+        # A plain function, not a Mock: the test harness runs Mock executor
+        # jobs inline, which would hide a client built on the event loop.
+        patch("custom_components.webtop.auth.WebtopClient", new=factory),
+        patch(
+            "custom_components.webtop.auth.async_fetch_login_counter", AsyncMock(return_value=0)
+        ) as counter,
     ):
         proxy = FakeWebtopClient()
         proxy.responses = factory.responses  # type: ignore[attr-defined]
         proxy.created = created  # type: ignore[attr-defined]
+        proxy.built_on_loop_thread = built_on_loop_thread  # type: ignore[attr-defined]
+        proxy.counter = counter  # type: ignore[attr-defined]
         yield proxy
 
 

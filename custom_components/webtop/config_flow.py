@@ -12,7 +12,7 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlowWithReload,
 )
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -22,21 +22,20 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from webtop import WebtopClient, WebtopLoginError
+from webtop import WebtopLoginError
 
+from .auth import async_create_client, login_failure_reason
 from .const import (
     CONF_DATA,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
-    DEFAULT_DATA,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
-    REQUEST_TIMEOUT,
 )
-from .coordinator import WebtopConfigEntry, is_transient_login_error
+from .coordinator import WebtopConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,18 +43,14 @@ STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_USERNAME): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Required(CONF_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-        vol.Optional(CONF_DATA, default=DEFAULT_DATA): TextSelector(
-            TextSelectorConfig(type=TextSelectorType.TEXT)
-        ),
+        vol.Optional(CONF_DATA): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
     }
 )
 
 STEP_REAUTH_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-        vol.Optional(CONF_DATA, default=DEFAULT_DATA): TextSelector(
-            TextSelectorConfig(type=TextSelectorType.TEXT)
-        ),
+        vol.Optional(CONF_DATA): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
     }
 )
 
@@ -68,18 +63,12 @@ class AccountInfo:
         self.title = title
 
 
-async def validate_login(data: Mapping[str, Any]) -> AccountInfo:
+async def validate_login(hass: HomeAssistant, data: Mapping[str, Any]) -> AccountInfo:
     """Log in once with a throwaway client.
 
     Raises WebtopLoginError on failure; the caller sorts transient from auth.
     """
-    client = WebtopClient(
-        username=data[CONF_USERNAME],
-        password=data[CONF_PASSWORD],
-        data=data.get(CONF_DATA) or DEFAULT_DATA,
-        timeout=REQUEST_TIMEOUT,
-        auto_login=False,
-    )
+    client = await async_create_client(hass, data[CONF_USERNAME], data[CONF_PASSWORD], data.get(CONF_DATA))
     try:
         session = await client.login()
     finally:
@@ -94,7 +83,7 @@ async def validate_login(data: Mapping[str, Any]) -> AccountInfo:
 
 def _error_key(err: Exception) -> str:
     if isinstance(err, WebtopLoginError):
-        return "cannot_connect" if is_transient_login_error(err) else "invalid_auth"
+        return login_failure_reason(err)
     return "unknown"
 
 
@@ -114,8 +103,9 @@ class WebtopConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             user_input[CONF_USERNAME] = user_input[CONF_USERNAME].strip()
+            user_input[CONF_DATA] = (user_input.get(CONF_DATA) or "").strip()
             try:
-                info = await validate_login(user_input)
+                info = await validate_login(self.hass, user_input)
             except Exception as err:
                 errors["base"] = _error_key(err)
                 if errors["base"] == "unknown":
@@ -142,9 +132,9 @@ class WebtopConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
         if user_input is not None:
-            candidate = {**entry.data, **user_input}
+            candidate = {**entry.data, **user_input, CONF_DATA: (user_input.get(CONF_DATA) or "").strip()}
             try:
-                info = await validate_login(candidate)
+                info = await validate_login(self.hass, candidate)
             except Exception as err:
                 errors["base"] = _error_key(err)
                 if errors["base"] == "unknown":

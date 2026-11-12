@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+import pytest
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from webtop import WebtopLoginError
 
+from custom_components.webtop.auth import compute_login_data
 from custom_components.webtop.const import (
     CONF_DATA,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
-    DEFAULT_DATA,
     DOMAIN,
+    LEGACY_DEFAULT_DATA,
 )
 
 from .conftest import LOGIN_DATA
 
-USER_INPUT = {CONF_USERNAME: " parent ", CONF_PASSWORD: "secret", CONF_DATA: DEFAULT_DATA}
+USER_INPUT = {CONF_USERNAME: " parent ", CONF_PASSWORD: "secret"}
 
 
 async def test_user_flow_creates_entry(hass: HomeAssistant, fake_client) -> None:
@@ -33,9 +35,48 @@ async def test_user_flow_creates_entry(hass: HomeAssistant, fake_client) -> None
     assert result["title"] == "דנה לוי (בית ספר לדוגמה)"
     assert result["data"][CONF_USERNAME] == "parent"
     assert result["result"].unique_id == "u-42"
+    assert result["data"][CONF_DATA] == ""
     # The validation client was closed, and the coordinator's own client logged in.
-    assert fake_client.created[0].closed is True
-    assert fake_client.created[0].auto_login is False
+    validation = fake_client.created[0]
+    assert validation.closed is True and validation.auto_login is False
+    # Data is derived from the trimmed username, and no client is built on the loop.
+    assert validation.data == compute_login_data("parent", 0)
+    assert not any(fake_client.built_on_loop_thread)
+
+
+async def test_user_flow_uses_server_login_counter(hass: HomeAssistant, fake_client) -> None:
+    fake_client.counter.return_value = 1
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    await hass.config_entries.flow.async_configure(result["flow_id"], USER_INPUT)
+    assert fake_client.created[0].data == compute_login_data("parent", 1)
+
+
+async def test_user_flow_data_override_and_legacy_default(hass: HomeAssistant, fake_client) -> None:
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    fake_client.responses["login"] = WebtopLoginError("Login returned status=false")
+    # pywebtop's old built-in default is not a real override.
+    await hass.config_entries.flow.async_configure(
+        result["flow_id"], {**USER_INPUT, CONF_DATA: LEGACY_DEFAULT_DATA}
+    )
+    assert fake_client.created[-1].data == compute_login_data("parent", 0)
+    # Anything else the user typed is sent as is.
+    await hass.config_entries.flow.async_configure(result["flow_id"], {**USER_INPUT, CONF_DATA: " captured== "})
+    assert fake_client.created[-1].data == "captured=="
+
+
+@pytest.mark.parametrize(
+    ("description", "error"),
+    [("CaptchaRequired", "captcha_required"), ("MoreThan5Retries", "too_many_attempts"), (None, "invalid_auth")],
+)
+async def test_user_flow_distinguishes_server_refusals(
+    hass: HomeAssistant, fake_client, description, error
+) -> None:
+    fake_client.responses["login"] = WebtopLoginError(
+        f"Login returned status=false. errorDescription={description!r}, errorId=None"
+    )
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], USER_INPUT)
+    assert result["errors"] == {"base": error}
 
 
 async def test_user_flow_invalid_auth(hass: HomeAssistant, fake_client) -> None:
@@ -88,7 +129,7 @@ async def test_reauth_flow(hass: HomeAssistant, fake_client, config_entry) -> No
     assert result["step_id"] == "reauth_confirm"
 
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_PASSWORD: "new-secret", CONF_DATA: DEFAULT_DATA}
+        result["flow_id"], {CONF_PASSWORD: "new-secret"}
     )
     await hass.async_block_till_done()
     assert result["type"] is FlowResultType.ABORT
@@ -105,7 +146,7 @@ async def test_reauth_rejects_other_account(hass: HomeAssistant, fake_client, co
     fake_client.responses["login"] = {**LOGIN_DATA, "userId": "someone-else"}
     result = await config_entry.start_reauth_flow(hass)
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_PASSWORD: "x", CONF_DATA: DEFAULT_DATA}
+        result["flow_id"], {CONF_PASSWORD: "x"}
     )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "wrong_account"
@@ -119,7 +160,7 @@ async def test_reauth_shows_error_on_bad_password(hass: HomeAssistant, fake_clie
     fake_client.responses["login"] = WebtopLoginError("Login returned status=false")
     result = await config_entry.start_reauth_flow(hass)
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_PASSWORD: "x", CONF_DATA: DEFAULT_DATA}
+        result["flow_id"], {CONF_PASSWORD: "x"}
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
