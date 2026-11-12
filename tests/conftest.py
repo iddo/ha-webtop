@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from freezegun.api import FrozenDateTimeFactory
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from webtop import WebtopLoginError, WebtopRequestError, WebtopSession
 
@@ -239,6 +240,17 @@ class FakeWebtopClient:
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
     """Make custom_components/ loadable in every test."""
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(freezer: FrozenDateTimeFactory) -> FrozenDateTimeFactory:
+    """Pin "today" to the date the fixtures use, so tests pass on any day.
+
+    Midday UTC is 10 November in every timezone the test harness might use
+    (it defaults to US/Pacific, not Israel).
+    """
+    freezer.move_to("2026-11-10 12:00:00+00:00")
+    return freezer
 
 
 @pytest.fixture
