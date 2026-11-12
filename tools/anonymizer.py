@@ -49,7 +49,7 @@ _PERSON_RE = re.compile(
 _ORGANIZATION_RE = re.compile(r"(school|institution|institute|mosad)[_ ]?name|^school$|city|settlement", re.I)
 _IDENTIFIER_RE = re.compile(
     r"(^|_)id$|[a-z]Id$|ID$|^id|identity|tz$|teudat|login|guid|uuid|url|link|image|photo|avatar|file|path|"
-    r"serial|birth|institutioncode|schoolcode|semel",
+    r"serial|birth|institutioncode|schoolcode|semel|study_?group|^groups$",
     re.I,
 )
 _GRADE_RE = re.compile(r"grade(?!s?list)|(?<!re)mark$|score|assessment|evaluation", re.I)

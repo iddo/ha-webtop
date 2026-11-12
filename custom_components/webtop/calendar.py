@@ -21,9 +21,6 @@ from .models import BellSchedule, SchoolEvent, Student
 
 def to_calendar_event(event: SchoolEvent, bell: BellSchedule) -> CalendarEvent:
     """Convert a tests-board item into a Home Assistant calendar event."""
-    parts = [event.title]
-    if event.subject and event.subject not in event.title:
-        parts.append(event.subject)
     times = event.times(bell) if event.start_date == event.end_date else None
     if times:
         tz = dt_util.get_default_time_zone()
@@ -35,8 +32,9 @@ def to_calendar_event(event: SchoolEvent, bell: BellSchedule) -> CalendarEvent:
     return CalendarEvent(
         start=start,
         end=end,
-        summary=" - ".join(parts),
+        summary=event.summary,
         description=event.note or None,
+        location=event.room or None,
         uid=event.identity(),
     )
 

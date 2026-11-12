@@ -30,6 +30,12 @@ class WebtopApiError(Exception):
         super().__init__(f"{what}: {detail}")
 
     @property
+    def is_blocked_view(self) -> bool:
+        """The school switched this view off for parents and pupils."""
+        text = self.description.casefold()
+        return "blocked" in text or "nopermission" in text.replace(" ", "") or "permissiondenied" in text
+
+    @property
     def looks_like_expired_session(self) -> bool:
         """A ``status: false`` with no error text is how a dead token presents."""
         return not self.description and self.error_id in (None, 0, "")
@@ -272,6 +278,12 @@ NO_HOMEWORK_VALUES = frozenset(
         "אין",
         "אין שיעורי בית",
         "אין שעורי בית",
+        "אין שיעורים",
+        "אין שעורים",
+        "אין שב",
+        "לא ניתנו שיעורי בית",
+        "לא ניתנו שיעורים",
+        "ללא שיעורים",
         "אין ש.ב",
         "אין ש״ב",
         "לא הוזן",
@@ -531,6 +543,8 @@ class Lesson:
     end: str = ""
     # What the teacher wrote about the lesson (``descClass``), once it has been reported.
     topic: str = ""
+    # The study group taught in this lesson; exams are addressed to study groups.
+    study_group: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -599,6 +613,7 @@ def parse_schedule(data: Any) -> list[Lesson]:
                         homework=_pick_text(node, "homeWork", "homework", "homeworkData"),
                         changed=_as_bool(_pick(node, "isChanged", "changed", "hasChange", "isSubstitute")),
                         topic=_pick_text(node, "descClass", "lessonSubject", "topic"),
+                        study_group=_as_int(_pick(node, "study_group", "studyGroupID", "studyGroupId")),
                         weekday=own_weekday,
                         start=format_time(_pick(node, *_START_TIME_KEYS)),
                         end=format_time(_pick(node, *_END_TIME_KEYS)),
@@ -700,27 +715,53 @@ def parse_unread_count(data: Any) -> int | None:
 BellSchedule = dict[int, tuple[dt.time, dt.time]]
 
 
-def parse_bell_schedule(data: Any, _depth: int = 0) -> BellSchedule:
-    """Find a ``hours: [{hour, fromTime, toTime}]`` list within a payload.
+_TIMES_IN_NAME_RE = re.compile(r"(\d{1,2}[:.]\d{2})\s*[-\u2013]\s*(\d{1,2}[:.]\d{2})")
 
-    It sits at ``data.hours`` on the tests board and at ``data.data.events.hours``
-    on the weekly schedule. A school that never entered its lesson times
-    answers ``":"`` for each, which yields an empty schedule.
+
+def _hour_row_times(row: dict[str, Any]) -> tuple[dt.time, dt.time] | None:
+    """Times of one lesson slot: explicit ``fromTime``/``toTime``, else read from its label.
+
+    The label looks like ``"3. 10:35-9:50"`` (end first, as it renders right-to-left),
+    so the two times are simply ordered.
+    """
+    start = parse_time(_pick(row, *_START_TIME_KEYS))
+    end = parse_time(_pick(row, *_END_TIME_KEYS))
+    if start and end and start < end:
+        return start, end
+    label = _pick(row, "name", "hourName", "hour_name")
+    match = _TIMES_IN_NAME_RE.search(label) if isinstance(label, str) else None
+    if match:
+        first, second = parse_time(match.group(1)), parse_time(match.group(2))
+        if first and second and first != second:
+            return min(first, second), max(first, second)
+    return None
+
+
+def parse_bell_schedule(data: Any, _depth: int = 0) -> BellSchedule:
+    """Find the school's lesson times within a payload.
+
+    They appear as ``hours: [{hour, name, fromTime, toTime}]`` on the tests board
+    (``data.hours``) and the weekly schedule (``data.data.events.hours``), and as
+    ``hourName`` labels on a timetable's ``hoursData`` rows. A school that never
+    entered its times answers ``":"`` with no label, which yields an empty schedule.
     """
     if isinstance(data, list):
         bell: BellSchedule = {}
         for row in data:
             if not isinstance(row, dict):
                 continue
+            if isinstance(row.get("hoursData"), list):  # a timetable day
+                for hour, times in parse_bell_schedule(row["hoursData"], _depth + 1).items():
+                    bell.setdefault(hour, times)
+                continue
             hour = _as_int(_pick(row, *_HOUR_KEYS))
-            start = parse_time(_pick(row, *_START_TIME_KEYS))
-            end = parse_time(_pick(row, *_END_TIME_KEYS))
-            if hour is not None and start and end and start < end:
-                bell[hour] = (start, end)
+            times = _hour_row_times(row)
+            if hour is not None and times:
+                bell[hour] = times
         return bell
     if not isinstance(data, dict) or _depth > 3:
         return {}
-    for key in ("hours", "hoursList", "allHours"):
+    for key in ("hours", "hoursList", "allHours", "scheduale"):
         found = parse_bell_schedule(data[key], _depth + 1) if isinstance(data.get(key), list) else {}
         if found:
             return found
@@ -776,16 +817,27 @@ class SchoolEvent:
     start_date: dt.date
     end_date: dt.date
     subject: str = ""
+    # The board's own label for an exam: מבחן, בוחן, עבודה להגשה ...
+    type: str = ""
     from_hour: int | None = None
     to_hour: int | None = None
     note: str = ""
-    # (class code, class number) pairs the item is for; empty means the whole school.
+    room: str = ""
+    # (class code, class number) pairs the item lists; empty means the whole school.
     classes: tuple[tuple[int | None, int | None], ...] = ()
+    # Study groups the item is addressed to. An exam for an elective lists every class
+    # its pupils come from, so the groups, not the classes, say who actually sits it.
+    groups: frozenset[int] = frozenset()
+    event_id: str = ""
 
     def identity(self) -> str:
+        if self.event_id:
+            return _digest(self.kind, self.event_id)
         return _digest(self.kind, self.title, self.subject, self.start_date.isoformat(), str(self.from_hour))
 
-    def applies_to(self, student: Student) -> bool:
+    def applies_to(self, student: Student, student_groups: frozenset[int] = frozenset()) -> bool:
+        if self.groups and student_groups:
+            return bool(self.groups & student_groups)
         if not self.classes or student.class_code is None:
             return True
         for code, number in self.classes:
@@ -794,27 +846,42 @@ class SchoolEvent:
         return False
 
     def times(self, bell: BellSchedule) -> tuple[dt.time, dt.time] | None:
-        """Start and end time of day, when lesson numbers and a bell schedule are known."""
+        """Start and end time of day, when lesson numbers and a bell schedule are known.
+
+        ``to_hour`` is the last lesson of the item, inclusive: an exam "from 1 to 3"
+        is labelled by the portal with lesson 3's own name as its end.
+        """
         if self.from_hour is None or self.from_hour not in bell:
             return None
         start = bell[self.from_hour][0]
-        # The client treats ``to_hour`` as exclusive (it looks up ``to_hour - 1``).
-        last = self.to_hour - 1 if self.to_hour is not None and self.to_hour > self.from_hour else self.from_hour
+        last = self.to_hour if self.to_hour is not None and self.to_hour >= self.from_hour else self.from_hour
         end = bell.get(last, bell[self.from_hour])[1]
         return (start, end) if start < end else None
+
+    @property
+    def summary(self) -> str:
+        """One line for a calendar or a notification: "מבחן: היסטוריה - פרקים 4-6"."""
+        details = [part for part in (self.subject, self.title) if part and part != self.type]
+        details = list(dict.fromkeys(details))
+        if self.type:
+            return f"{self.type}: {' - '.join(details)}" if details else self.type
+        return " - ".join(details) or self.kind
 
     def as_dict(self, bell: BellSchedule | None = None) -> dict[str, Any]:
         times = self.times(bell or {})
         return {
             "kind": self.kind,
+            "type": self.type,
             "title": self.title,
             "subject": self.subject,
+            "summary": self.summary,
             "date": self.start_date.isoformat(),
             "end_date": self.end_date.isoformat(),
             "from_hour": self.from_hour,
             "to_hour": self.to_hour,
             "start": times[0].strftime("%H:%M") if times else "",
             "end": times[1].strftime("%H:%M") if times else "",
+            "room": self.room,
             "note": self.note,
         }
 
@@ -828,9 +895,6 @@ _BOARD_LISTS = (("exams", "exam"), ("events", "event"), ("vactications", "vacati
 
 def _classes_of(row: dict[str, Any]) -> tuple[tuple[int | None, int | None], ...]:
     pairs: list[tuple[int | None, int | None]] = []
-    own_code = _as_int(_pick(row, "classCode", "class_Code", "ClassCode"))
-    if own_code is not None:
-        pairs.append((own_code, _as_int(_pick(row, "classNumber", "classNum", "class_Num", "ClassNumber"))))
     listed = _pick(row, "classes", "classesList")
     if isinstance(listed, list):
         for item in listed:
@@ -841,13 +905,42 @@ def _classes_of(row: dict[str, Any]) -> tuple[tuple[int | None, int | None], ...
             elif isinstance(item, str) and "|" in item:
                 code, _, number = item.partition("|")
                 pairs.append((_as_int(code), _as_int(number)))
+    if not pairs:
+        # Only a grade level on the row itself: the whole grade.
+        own_code = _as_int(_pick(row, "classCode", "class_Code", "ClassCode"))
+        if own_code is not None:
+            pairs.append((own_code, _as_int(_pick(row, "classNumber", "classNum", "class_Num", "ClassNumber"))))
     return tuple(dict.fromkeys(pairs))
 
 
+def _groups_of(row: dict[str, Any]) -> frozenset[int]:
+    groups: set[int] = set()
+    own = _as_int(_pick(row, "studyGroupID", "studyGroupId", "study_group"))
+    if own:
+        groups.add(own)
+    listed = _pick(row, "groupsList", "studyGroups")
+    if isinstance(listed, list):
+        for item in listed:
+            group = _as_int(item.get("id")) if isinstance(item, dict) else _as_int(item)
+            if group:
+                groups.add(group)
+    return frozenset(groups)
+
+
 def parse_tests_board(data: Any) -> list[SchoolEvent]:
-    """Exams, events and vacations from an ``EventsTestsBoard`` payload."""
+    """Exams, events and vacations from an ``EventsTestsBoard`` payload.
+
+    A real exam row: ``{id, title, subject, subjectID, type, typeID, date, fromHour, toHour,
+    classCode, classes: [{classCode, classNumber}], studyGroupID, groupsList: [{id, title}],
+    roomName}``. ``subject`` is often empty; ``subjectID`` then points into ``data.subjects``.
+    """
     if not isinstance(data, dict):
         return []
+    subjects = {
+        _as_int(row.get("id")): _text(row.get("title"))
+        for row in data.get("subjects") or []
+        if isinstance(row, dict)
+    }
     found: list[SchoolEvent] = []
     for key, kind in _BOARD_LISTS:
         rows = data.get(key)
@@ -861,18 +954,24 @@ def parse_tests_board(data: Any) -> list[SchoolEvent]:
                 continue
             end = parse_date(_pick(row, *_EVENT_END_KEYS)) or start
             subject = _pick_text(row, "subject", "subjectName", "subject_name", "lesson", "profession")
-            title = _pick_text(row, "title", "name", "eventName", "content", "description", "type") or subject
+            subject = subject or subjects.get(_as_int(_pick(row, "subjectID", "subjectId")), "")
+            label = _pick_text(row, "type", "typeName")
+            title = _pick_text(row, "title", "name", "eventName", "content", "description")
             found.append(
                 SchoolEvent(
                     kind=kind,
-                    title=title or kind,
+                    title=title or subject or label or kind,
                     start_date=start,
                     end_date=max(start, end),
                     subject=subject,
+                    type=label,
                     from_hour=_as_int(_pick(row, *_FROM_HOUR_KEYS)),
                     to_hour=_as_int(_pick(row, *_TO_HOUR_KEYS)),
                     note=_pick_text(row, "note", "remark", "remarks", "comment", "details"),
+                    room=_pick_text(row, "roomName", "room"),
                     classes=_classes_of(row),
+                    groups=_groups_of(row),
+                    event_id=_pick_text(row, "id", "eventGroupID"),
                 )
             )
     found.sort(key=lambda e: (e.start_date, e.from_hour if e.from_hour is not None else 99))
@@ -891,8 +990,12 @@ class Grade:
     weight: str = ""
     teacher: str = ""
     remark: str = ""
+    evaluation_id: str = ""
 
     def identity(self) -> str:
+        # The grade is part of the identity so that a corrected mark is announced again.
+        if self.evaluation_id:
+            return _digest(self.evaluation_id, self.grade)
         return _digest(self.subject, self.title, self.date[:10], self.grade)
 
     def as_dict(self) -> dict[str, Any]:
@@ -901,7 +1004,7 @@ class Grade:
             "grade": self.grade,
             "title": self.title,
             "type": self.type,
-            "date": self.date,
+            "date": self.date[:10],
             "weight": self.weight,
             "teacher": self.teacher,
             "remark": self.remark,
@@ -909,13 +1012,23 @@ class Grade:
 
 
 def parse_grades(data: Any) -> list[Grade]:
-    """Newest first."""
+    """Graded evaluations, newest first.
+
+    A real row: ``{evaluationID, title, date, type, subject, level, grade, gradeTranslation,
+    assessment, weight, teacherFirstName, teacherLastName, remark, components}``. The pupil
+    card also lists evaluations that have no mark yet (``grade: null``); those are skipped.
+    """
     grades: list[Grade] = []
     for row in _row_list(data):
         subject = _pick_text(row, "subject", "subjectName", "subject_name", "lesson")
-        value = _pick_text(row, "grade", "numeric_grade", "numGrade", "mark", "assessment", "textGrade")
+        value = _pick_text(
+            row, "grade", "gradeTranslation", "assessment", "numeric_grade", "numGrade", "mark", "textGrade"
+        )
         if not subject or not value:
             continue
+        level = _pick_text(row, "level", "subjectLevel")
+        if level and level not in subject:
+            subject = f"{subject} ({level})"
         last = _pick_text(row, "teacherLastName", "family_name")
         first = _pick_text(row, "teacherFirstName", "private_name")
         grades.append(
@@ -928,10 +1041,42 @@ def parse_grades(data: Any) -> list[Grade]:
                 weight=_pick_text(row, "weight", "percent"),
                 teacher=f"{last} {first}".strip() or _pick_text(row, "teacher", "teacherName"),
                 remark=_pick_text(row, "remark", "remarks", "comment", "note"),
+                evaluation_id=_pick_text(row, "evaluationID", "evaluationId"),
             )
         )
     grades.sort(key=lambda g: g.date, reverse=True)
     return grades
+
+
+def parse_pending_evaluations(data: Any) -> list[SchoolEvent]:
+    """Evaluations on the pupil card that have no mark yet: tests set for the pupil.
+
+    The grades list includes them with ``grade: null``. They carry a date, a type and a
+    subject but no lesson numbers, so they make all-day entries. This is what tells a
+    parent about upcoming tests at a school that does not use the tests board.
+    """
+    found: list[SchoolEvent] = []
+    for row in _row_list(data):
+        if _pick(row, "grade", "gradeTranslation", "assessment") is not None:
+            continue
+        date = parse_date(_pick(row, "date", "gradeDate", "eventDate"))
+        subject = _pick_text(row, "subject", "subjectName", "subject_name")
+        if date is None or not subject:
+            continue
+        label = _pick_text(row, "type", "gradeType")
+        found.append(
+            SchoolEvent(
+                kind="exam",
+                title=_pick_text(row, "title", "eventName", "name") or subject,
+                start_date=date,
+                end_date=date,
+                subject=subject,
+                type=label,
+                event_id=_pick_text(row, "evaluationID", "evaluationId"),
+            )
+        )
+    found.sort(key=lambda e: e.start_date)
+    return found
 
 
 @dataclass
@@ -988,3 +1133,28 @@ def parse_changes(data: Any) -> list[ScheduleChange]:
             )
     rows_out.sort(key=lambda c: c.hour if c.hour is not None else 99)
     return rows_out
+
+
+def student_groups(lessons: list[Any]) -> frozenset[int]:
+    """The study groups a student attends, as seen on their lessons."""
+    return frozenset(lesson.study_group for lesson in lessons if lesson.study_group)
+
+
+def fill_rooms(dated: list[Any], standing: list[Any]) -> None:
+    """Copy rooms from the standing timetable onto this week's lessons (which carry none).
+
+    Matched by weekday and lesson number; when a slot holds several parallel lessons
+    the subject has to match as well.
+    """
+    by_slot: dict[tuple[int | None, int | None], list[Any]] = {}
+    for lesson in standing:
+        if lesson.room:
+            by_slot.setdefault((lesson.weekday, lesson.hour), []).append(lesson)
+    for lesson in dated:
+        if lesson.room:
+            continue
+        candidates = by_slot.get((lesson.weekday, lesson.hour), [])
+        if len(candidates) > 1:
+            candidates = [c for c in candidates if normalize_name(c.subject) == normalize_name(lesson.subject)]
+        if len(candidates) == 1:
+            lesson.room = candidates[0].room

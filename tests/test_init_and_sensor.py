@@ -94,6 +94,8 @@ async def test_setup_creates_devices_and_sensors(hass: HomeAssistant, fake_clien
     assert lessons.state == "2"
     assert [lesson["subject"] for lesson in lessons.attributes["today"]] == ["מתמטיקה", "אנגלית"]
     assert lessons.attributes["today"][0]["topic"] == "שברים"
+    # Rooms are not on the dated week; they are filled in from the standing timetable.
+    assert [lesson["room"] for lesson in lessons.attributes["today"]] == ["חדר 12", "מעבדה 3"]
     assert len(lessons.attributes["week"]) == 4
     assert _state(hass, "sensor.nv_m_lvy_class").state == "ג'2"
 
@@ -112,8 +114,9 @@ async def test_setup_creates_devices_and_sensors(hass: HomeAssistant, fake_clien
         "path": "/server/api/PupilCard/GetPupilLessonsAndHomework",
         "weekIndex": 0, "viewType": 0, "studyYear": 2027, "studentID": ENCRYPTED_ID_A, "classCode": 3, "moduleID": 10,
     }  # fmt: skip
-    # With the dated week available, the older per-day endpoints are not called at all.
-    assert not [c for c in client.calls if c[0] in ("get_homework", "get_pupil_schedule", "get_discipline_events")]
+    # With the pupil card available, the dashboard's cut-down widgets are not called at all.
+    assert not [c for c in client.calls if c[0] in ("get_homework", "get_discipline_events", "GetGrades")]
+    assert len([c for c in client.calls if c[0] == "get_pupil_schedule"]) == 2  # once per child, for rooms
     # Lesson times came with the tests board, so the weekly-schedule lookup was not needed.
     assert not [c for c in client.calls if c[0] == "WeeklySchedualeForToday"]
 
@@ -233,7 +236,8 @@ async def test_server_error_marks_unavailable_then_recovers(
 
 
 async def test_optional_endpoint_failure_keeps_other_data(hass: HomeAssistant, fake_client, config_entry) -> None:
-    fake_client.responses["GetGrades"] = {"status": False, "errorDescription": "view is blocked"}
+    fake_client.responses["GetPupilGrades"] = {"status": False, "errorDescription": "view is blocked"}
+    fake_client.responses["GetGrades"] = WebtopRequestError("POST /x failed (500): oops")
     fake_client.responses["GetPupilDiciplineEvents"] = WebtopRequestError("POST /x failed (500): oops")
     fake_client.responses["get_discipline_events"] = WebtopRequestError("POST /x failed (500): oops")
     fake_client.responses["get_preview_unread_notifications"] = WebtopRequestError("POST /x failed (502): bad")
@@ -268,6 +272,45 @@ async def test_week_unavailable_falls_back_to_timetable_and_todays_homework(
     assert lessons.attributes["today"][0]["teacher"] == "כהן רחל"
 
 
+async def test_school_that_blocks_the_pupil_card(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One captured school answers "view is blocked" to every pupil-card request."""
+    blocked = {"status": False, "errorDescription": "view is blocked", "data": None}
+    for name in ("GetPupilLessonsAndHomework", "GetPupilGrades", "GetPupilDiciplineEvents", "get_pupil_schedule"):
+        fake_client.responses[name] = blocked
+    await _setup(hass, config_entry)
+
+    # The dashboard widgets still answer: recent grades and behaviour, and today's homework.
+    assert _state(hass, "sensor.nv_m_lvy_latest_grade").state == "92"
+    assert _state(hass, "sensor.nv_m_lvy_behaviour_events").attributes["total"] == 2
+    assert _state(hass, "sensor.nv_m_lvy_homework_today").state == "1"
+    # No timetable at all, so nothing can be said about lessons.
+    assert _state(hass, "sensor.nv_m_lvy_lessons_today").state == "unknown"
+    assert _state(hass, "sensor.nv_m_lvy_current_lesson").state == "unknown"
+    assert "failed; keeping the other data" not in caplog.text  # a switched-off view is not a failure
+
+    client = fake_client.created[0]
+    blocked_calls = ("GetPupilLessonsAndHomework", "GetPupilGrades", "GetPupilDiciplineEvents", "get_pupil_schedule")
+    before = {name: len([c for c in client.calls if c[0] == name]) for name in blocked_calls}
+    assert set(before.values()) == {2}  # asked once per child
+
+    # Later polls the same day do not ask again...
+    freezer.tick(timedelta(minutes=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert {name: len([c for c in client.calls if c[0] == name]) for name in blocked_calls} == before
+    assert _state(hass, "sensor.nv_m_lvy_latest_grade").state == "92"
+
+    # ...but the next day they do, in case the school opened the view.
+    for name in blocked_calls:
+        client.responses.pop(name)
+    freezer.tick(timedelta(hours=24))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert _state(hass, "sensor.nv_m_lvy_lessons_today").state != "unknown"
+
+
 async def test_behaviour_falls_back_to_the_dashboard_widget(hass: HomeAssistant, fake_client, config_entry) -> None:
     fake_client.responses["GetPupilDiciplineEvents"] = WebtopRequestError("POST /x failed (500): oops")
     await _setup(hass, config_entry)
@@ -287,7 +330,10 @@ async def test_features_the_school_switched_off_are_not_requested(
     fake_client.responses["get_students"] = {"status": True, "data": dashboard}
     await _setup(hass, config_entry)
     called = {c[0] for c in fake_client.created[0].calls}
-    skipped = {"GetGrades", "GetPupilDiciplineEvents", "get_discipline_events", "ChangesAndMessagesDataForToday"}
+    skipped = {
+        "GetGrades", "GetPupilGrades", "GetPupilDiciplineEvents", "get_discipline_events",
+        "ChangesAndMessagesDataForToday",
+    }  # fmt: skip
     assert not called & skipped
     for entity in ("latest_grade", "behaviour_events", "schedule_changes_today"):
         assert _state(hass, f"sensor.nv_m_lvy_{entity}").state == "unknown"
@@ -299,7 +345,7 @@ async def test_widget_answering_not_allowed_is_unknown_not_zero(
 ) -> None:
     empty = {"messages": [], "events": [], "changes": [], "exams": [], "allowToViewThis": False}
     fake_client.responses["ChangesAndMessagesDataForToday"] = {"status": True, "data": empty}
-    fake_client.responses["GetGrades"] = {"status": True, "data": {"allowToViewThis": True, "dataTable": []}}
+    fake_client.responses["GetPupilGrades"] = {"status": True, "data": []}
     await _setup(hass, config_entry)
     assert _state(hass, "sensor.nv_m_lvy_schedule_changes_today").state == "unknown"
     assert _state(hass, "sensor.nv_m_lvy_latest_grade").state == "unknown"  # allowed, but no grades yet
@@ -405,6 +451,33 @@ async def test_failed_switch_skips_that_school_only(hass: HomeAssistant, fake_cl
     assert config_entry.state is ConfigEntryState.LOADED
     assert hass.states.get("sensor.myh_lvy_homework_today") is not None
     assert hass.states.get("sensor.nv_m_lvy_homework_today") is None
+
+
+async def test_school_that_cannot_be_switched_to_keeps_its_last_data(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory
+) -> None:
+    session_a = dict(LOGIN_DATA)
+    session_b = {**LOGIN_DATA, "id": "enc-login-b==", "schoolName": "School B", "institutionCode": 550011}
+    dashboard_a = {"status": True, "data": {**DASHBOARD["data"], "childrens": [DASHBOARD["data"]["childrens"][0]]}}
+    dashboard_b = {"status": True, "data": {**DASHBOARD["data"], "childrens": [DASHBOARD["data"]["childrens"][1]]}}
+    fake_client.responses.update(
+        {
+            "get_linked_students": LINKED,
+            # Poll 1: switch to B. Poll 2: back to A works, then B is refused.
+            "switch_student": Seq([session_b, session_a, WebtopLoginError("Switch student failed: {}")]),
+            "get_students": Seq([dashboard_a, dashboard_b, dashboard_a]),
+        }
+    )
+    await _setup(hass, config_entry)
+    assert _state(hass, "sensor.myh_lvy_class").state == "ו'1"
+
+    freezer.tick(timedelta(minutes=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    # School B was skipped this poll, yet its student is still there with the earlier values.
+    assert _state(hass, "sensor.myh_lvy_class").state == "ו'1"
+    assert _state(hass, "sensor.myh_lvy_latest_grade").state == "92"
+    assert _state(hass, "sensor.nv_m_lvy_homework_today").state == "1"
 
 
 async def test_new_student_gets_entities_without_reload(

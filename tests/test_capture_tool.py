@@ -87,14 +87,22 @@ async def test_capture_writes_only_anonymized_files(tmp_path: Path, capsys) -> N
     assert requests["dashboard_init"]["parsed_by_integration"] == {"students": 2}
     assert requests["homework_today__student1"]["parsed_by_integration"] == {"allowed": True, "homework": 1}
     assert requests["pupil_schedule__student1"]["parsed_by_integration"] == {
-        "lessons": 3, "dated": 0, "with_weekday": 3, "with_teacher": 3, "with_room": 0, "with_topic": 0,
+        "lessons": 3, "dated": 0, "with_weekday": 3, "with_teacher": 3, "with_room": 2, "with_topic": 0,
         "homework_items": 0, "homework_most_repeated": 0, "bell_hours": 0,
     }  # fmt: skip
+    # Answered on the raw data, because anonymization scrambles the ids that link these responses.
+    check = requests["cross_check__student1"]
+    assert (check["exams_on_board"], check["exams_with_groups"]) == (5, 4)
+    assert check["study_groups_on_lessons"] == 4
+    assert check["exams_for_a_study_group_of_the_student"] == 2
+    assert check["exams_listing_the_students_class"] == 4  # includes an elective the child does not take
+    assert check["exams_the_integration_would_show"] == 3
+    assert check["week_lessons_given_a_room_from_the_timetable"] == 2
     week = requests["pupil_lessons_homework__student1"]["parsed_by_integration"]
     assert (week["lessons"], week["dated"], week["with_topic"], week["homework_items"]) == (4, 4, 3, 2)
     assert requests["pupil_discipline__student1"]["parsed_by_integration"] == {"allowed": True, "events": 4}
     assert requests["events_tests_board"]["parsed_by_integration"] == {
-        "available": True, "exams": 4, "events": 1, "vacations": 1, "bell_hours": 4,
+        "available": True, "exams": 5, "events": 1, "vacations": 1, "bell_hours": 5,
     }  # fmt: skip
     assert requests["weekly_schedule_today__student1"]["parsed_by_integration"] == {"bell_hours": 4}
     assert requests["menu_counters"]["parsed_by_integration"] == {

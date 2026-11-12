@@ -257,6 +257,46 @@ def parser_summary(name: str, data: Any, today: str) -> dict[str, Any] | None:
     return None
 
 
+def cross_checks(raw: dict[str, Any], prefix: str, students: list[models.Student]) -> list[dict[str, Any]]:
+    """Counts that need two responses at once, computed on the RAW data.
+
+    Anonymization scrambles ids, so "which exams are for this child's study groups"
+    cannot be worked out from the written files; it is answered here instead.
+    """
+
+    def data_of(name: str) -> Any:
+        body = raw.get(prefix + name)
+        return body.get("data") if isinstance(body, dict) else None
+
+    board = models.parse_tests_board(data_of("events_tests_board"))
+    exams = [e for e in board if e.kind == "exam"]
+    out: list[dict[str, Any]] = []
+    for index, student in enumerate(students, 1):
+        week = models.parse_schedule(data_of(f"pupil_lessons_homework__student{index}"))
+        standing = models.parse_schedule(data_of(f"pupil_schedule__student{index}"))
+        today = models.parse_schedule(data_of(f"schedule_today__student{index}"))
+        groups = models.student_groups(week) | models.student_groups(standing) | models.student_groups(today)
+        before = [lesson.room for lesson in week]
+        models.fill_rooms(week, standing)
+        out.append(
+            {
+                "name": f"{prefix}cross_check__student{index}",
+                "path": "(computed)",
+                "study_groups_on_lessons": len(groups),
+                "exams_on_board": len(exams),
+                "exams_with_groups": sum(1 for e in exams if e.groups),
+                "exams_for_a_study_group_of_the_student": sum(1 for e in exams if e.groups & groups),
+                "exams_listing_the_students_class": sum(1 for e in exams if e.applies_to(student)),
+                "exams_the_integration_would_show": sum(1 for e in exams if e.applies_to(student, groups)),
+                "week_lessons": len(week),
+                "week_lessons_given_a_room_from_the_timetable": sum(
+                    1 for lesson, old in zip(week, before, strict=True) if lesson.room and not old
+                ),
+            }
+        )
+    return out
+
+
 async def capture(args: argparse.Namespace, username: str, password: str, llm: LocalLLM | None) -> int:
     now = datetime.now().astimezone()
     today = now.strftime("%Y-%m-%d")
@@ -392,6 +432,7 @@ async def capture(args: argparse.Namespace, username: str, password: str, llm: L
                     }
                     await call(endpoint, context, f"{prefix}{endpoint.name}__student{index}")
             students_total += min(len(students), args.max_students)
+            manifest.extend(cross_checks(raw, prefix, students[: args.max_students]))
 
     how = f"with local model {llm.model}" if llm else "in strict mode"
     print(f"\nAnonymizing {len(raw)} responses {how} ...")

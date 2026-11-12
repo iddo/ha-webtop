@@ -67,6 +67,10 @@ KEY_A = Student.from_dashboard(DASHBOARD["data"]["childrens"][0], school_name=SC
 KEY_B = Student.from_dashboard(DASHBOARD["data"]["childrens"][1], school_name=SCHOOL).key
 
 
+# Study group ids, per subject, for student A. Exams are addressed to study groups.
+GROUPS = {"תורה": 3003, "מתמטיקה": 3001, "אנגלית": 3002, "מדעים": 3004}
+
+
 def _week_lesson(
     day: int, hour: int, subject: str, teacher: str, homework: str = "", topic: str = ""
 ) -> dict[str, Any]:
@@ -78,7 +82,7 @@ def _week_lesson(
         "day_no": day,
         "hour_no": hour,
         "hour_name": None,
-        "study_group": 860260,
+        "study_group": GROUPS[subject],
         "descClass": topic,
         "homeWork": homework,
         "statClass": 1 if topic else 0,
@@ -118,29 +122,34 @@ LESSONS_WEEK = _week(
 )
 LESSONS_WEEK_EMPTY = _week({})
 
-# PupilCard/GetPupilScheduale: the standing timetable, keyed by weekday, no dates.
-TIMETABLE = {
-    "status": True,
-    "data": [
-        {
-            "dayIndex": day,
-            "hoursData": [
+# PupilCard/GetPupilScheduale: the standing timetable, keyed by weekday, no dates. Some schools
+# label each lesson slot with its times ("1. 8:45-8:00", end first); others leave hourName null.
+_BELL = [("08:00", "08:45"), ("08:45", "09:30"), ("09:50", "10:35"), ("10:35", "11:20")]
+_TIMETABLE_SLOTS = {(3, 1): ("מתמטיקה", "חדר 12"), (3, 2): ("אנגלית", "מעבדה 3"), (4, 1): ("מתמטיקה", None)}
+
+
+def _timetable(labels: bool) -> dict[str, Any]:
+    days = []
+    for day in range(1, 7):
+        hours = []
+        for hour, (start, end) in enumerate(_BELL[:3], 1):
+            slot = _TIMETABLE_SLOTS.get((day, hour))
+            hours.append(
                 {
                     "hour": hour,
-                    "hourName": None,
-                    "scheduale": (
-                        [{"day": day, "hour": hour, "subject": subject, "subjectLevel": "",
-                          "teacherLastName": "כהן", "teacherPrivateName": "רחל", "room": None}]
-                        if (day, hour) in {(3, 1), (3, 2), (4, 1)}
-                        else []
-                    ),
+                    "hourName": f"{hour}. {end.lstrip('0')}-{start.lstrip('0')}" if labels else None,
+                    "scheduale": [
+                        {"day": day, "hour": hour, "subject": slot[0], "subjectLevel": "",
+                         "teacherLastName": "כהן", "teacherPrivateName": "רחל", "room": slot[1]}
+                    ] if slot else [],
                 }
-                for hour, subject in ((1, "מתמטיקה"), (2, "אנגלית"), (3, "חינוך גופני"))
-            ],
-        }
-        for day in range(1, 7)
-    ],
-}  # fmt: skip
+            )  # fmt: skip
+        days.append({"dayIndex": day, "hoursData": hours})
+    return {"status": True, "data": days}
+
+
+TIMETABLE = _timetable(labels=False)
+TIMETABLE_WITH_LABELS = _timetable(labels=True)
 
 # dashboard/GetHomeWork: today only, no dates. Used when the dated week is unavailable.
 HOMEWORK_A = {
@@ -246,7 +255,6 @@ MENU_COUNTERS = {
 
 # dashboard/WeeklySchedualeForToday: carries the bell schedule one level down. A school that never
 # entered its lesson times answers ":" for each, as in WEEKLY_WITHOUT_TIMES.
-_BELL = [("08:00", "08:45"), ("08:45", "09:30"), ("09:50", "10:35"), ("10:35", "11:20")]
 
 
 def _weekly(times: list[tuple[str, str]]) -> dict[str, Any]:
@@ -276,52 +284,110 @@ def _weekly(times: list[tuple[str, str]]) -> dict[str, Any]:
 WEEKLY = _weekly(_BELL)
 WEEKLY_WITHOUT_TIMES = _weekly([(":", ":")] * 4)
 
-# shotef/EventsTestsBoard. The real capture came from a school that does not use the board
-# (TESTS_BOARD_UNUSED); the populated shape follows what the Webtop web client reads.
+# shotef/EventsTestsBoard. One captured school does not use the board (TESTS_BOARD_UNUSED); another
+# does. Exam rows and hours follow that capture; event and vacation rows were empty there and
+# still follow what the Webtop web client reads.
 TESTS_BOARD_UNUSED = {
     "status": True,
     "data": {"classes": None, "instructorClasses": None, "studyGroups": None, "exams": None, "vactications": None,
              "events": None, "subjects": None, "examTypes": None, "eventsTypes": None, "hours": None,
              "inactiveDays": None, "startDate": "0001-01-01T00:00:00"},
 }  # fmt: skip
+def _exam(
+    exam_id: int, date: str, hours: tuple[int, int], kind: str, title: str, *, subject: str = "", subject_id: int = 0,
+    classes: tuple[tuple[int, int], ...] = ((3, 2),), groups: tuple[int, ...] = (),
+) -> dict[str, Any]:  # fmt: skip
+    """An exam row as the tests board returns it."""
+    return {
+        "fromHourName": f"{hours[0]}.",
+        "tomHourName": f"{hours[1]}.",
+        "groupsList": [{"id": group, "title": f"קבוצה {group}"} for group in groups],
+        "classes": [{"classCode": c, "classNumber": n, "title": None, "itemId": None} for c, n in classes],
+        "rooms": None,
+        "id": exam_id,
+        "studyGroupID": groups[0] if groups else 0,
+        "subjectID": subject_id,
+        "classCode": classes[0][0],
+        "title": title,
+        "subject": subject,
+        "date": f"{date}T00:00:00",
+        "typeID": 5,
+        "fromHour": hours[0],
+        "toHour": hours[1],  # inclusive
+        "eventGroupID": exam_id,
+        "type": kind,
+        "roomName": None,
+    }
+
+
 TESTS_BOARD = {
     "status": True,
     "data": {
-        "hours": [{"hour": hour, "fromTime": start, "toTime": end} for hour, (start, end) in enumerate(_BELL, 1)],
+        "classes": [{"classCode": 3, "classNumber": 2, "title": None, "itemId": None}],
+        "hours": [
+            *(
+                {"hour": hour, "name": f"{hour}. {end}-{start}", "fromTime": start, "toTime": end}
+                for hour, (start, end) in enumerate(_BELL, 1)
+            ),
+            # The times are sometimes missing while the label still has them.
+            {"hour": 5, "name": "5. 12:25-11:40", "fromTime": ":", "toTime": ":"},
+        ],
+        "subjects": [{"id": 11, "title": "היסטוריה"}, {"id": 12, "title": "תיאטרון"}],
+        "examTypes": [{"id": 5, "title": "מבחן", "viewOrder": 0}, {"id": 6, "title": "בוחן", "viewOrder": 1}],
         "exams": [
-            {"title": "מבחן", "subject": "היסטוריה", "date": "2026-11-18T00:00:00", "fromHour": 2, "toHour": 4,
-             "classCode": 3, "classNumber": 2, "note": "פרקים 4-6"},
-            {"title": "בוחן", "subject": "אנגלית", "date": "2026-11-12T00:00:00", "fromHour": 1, "toHour": 2,
-             "classCode": 3, "classNumber": 2},
-            {"title": "מבחן", "subject": "מתמטיקה", "date": "2026-11-05T00:00:00", "fromHour": 1, "toHour": 3,
-             "classCode": 3, "classNumber": 2},
-            {"title": "מבחן", "subject": "מדעים", "date": "2026-11-25T00:00:00", "fromHour": 3, "toHour": 5,
-             "classCode": 6, "classNumber": 1},
+            # No study group: for the listed class. The subject is only given by id.
+            _exam(501, "2026-11-18", (2, 3), "מבחן", "פרקים 4-6", subject_id=11),
+            _exam(502, "2026-11-12", (1, 1), "בוחן", "אוצר מילים", subject="אנגלית", groups=(GROUPS["אנגלית"],)),
+            _exam(503, "2026-11-05", (1, 2), "מבחן", "שברים", subject="מתמטיקה", groups=(GROUPS["מתמטיקה"],)),
+            _exam(504, "2026-11-25", (3, 4), "מבחן", "תאים", subject="מדעים", classes=((6, 1),), groups=(6001,)),
+            # An elective: it lists the class, but only pupils of that study group sit it.
+            _exam(505, "2026-11-19", (1, 1), "עבודה להגשה", "מונולוג", subject_id=12,
+                  classes=((3, 1), (3, 2), (3, 3)), groups=(9999,)),
         ],
         "events": [
             {"title": "יום ספורט", "from_date": "2026-11-20T00:00:00", "to_date": "2026-11-20T00:00:00",
-             "from_hour": 1, "to_hour": 5, "typeID": 4, "classes": []},
+             "from_hour": 1, "to_hour": 4, "typeID": 4, "classes": []},
         ],
         "vactications": [
             {"title": "חופשת חנוכה", "from_date": "2026-12-15T00:00:00", "to_date": "2026-12-22T00:00:00"},
         ],
-        "classes": [{"classCode": 3, "classNumber": 2, "itemId": "3|2"}],
+        "inactiveDays": [{"day_number": 6}, {"day_number": 7}],
+        "startDate": "2026-11-01T00:00:00",
     },
 }  # fmt: skip
 
-# dashboard/GetGrades. The capture had an empty dataTable; the row shape follows the web client.
-GRADES = {
-    "status": True,
-    "data": {
-        "allowToViewThis": True,
-        "dataTable": [
-            {"subject": "אנגלית", "title": "בוחן אוצר מילים", "type": "בוחן", "date": "2026-10-20T00:00:00",
-             "grade": 78, "weight": 5, "teacherLastName": "לוי", "teacherFirstName": "דוד"},
-            {"subject": "מדעים", "title": "בוחן פתע", "type": "בוחן", "date": "2026-11-03T00:00:00",
-             "grade": 92, "weight": 10, "teacherLastName": "שפירא", "teacherFirstName": "נועה", "remark": "כל הכבוד"},
-        ],
-    },
-}  # fmt: skip
+
+def _grade(evaluation_id: int, subject: str, title: str, date: str, grade: int | None, **extra: Any) -> dict[str, Any]:
+    return {
+        "evaluationID": evaluation_id,
+        "title": title,
+        "date": f"{date}T00:00:00",
+        "type": "בוחן",
+        "typeCode": 6,
+        "teacherFirstName": "נועה",
+        "teacherLastName": "שפירא",
+        "grade": grade,
+        "gradeTranslation": None,
+        "subject": subject,
+        "level": None,
+        "weight": 10 if grade is not None else None,
+        "remark": None,
+        "assessment": None,
+        "components": [],
+        "isDeleted": 0,
+        **extra,
+    }
+
+
+_GRADE_ROWS = [
+    _grade(701, "אנגלית", "בוחן אוצר מילים", "2026-10-20", 78, weight=5),
+    _grade(702, "מדעים", "בוחן פתע", "2026-11-03", 92, remark="כל הכבוד"),
+    _grade(703, "היסטוריה", "מבחן", "2026-11-08", None),  # set, not marked yet
+]
+# PupilCard/GetPupilGrades: every evaluation of the year, marked or not.
+GRADES_CARD = {"status": True, "data": _GRADE_ROWS}
+# dashboard/GetGrades: the latest marked ones.
+GRADES = {"status": True, "data": {"allowToViewThis": True, "dataTable": _GRADE_ROWS[:2]}}
 
 # dashboard/ChangesAndMessagesDataForToday
 CHANGES = {
@@ -347,6 +413,7 @@ REQUEST_DEFAULTS: dict[str, Any] = {
     "GetMenuCounters": MENU_COUNTERS,
     "EventsTestsBoard": TESTS_BOARD,
     "WeeklySchedualeForToday": WEEKLY,
+    "GetPupilGrades": GRADES_CARD,
     "GetGrades": GRADES,
     "ChangesAndMessagesDataForToday": CHANGES,
     # Used by the capture tool, which calls every endpoint through request().

@@ -14,9 +14,11 @@ from custom_components.webtop.models import (
     parse_changes,
     parse_date,
     parse_grades,
+    parse_pending_evaluations,
     parse_schedule,
     parse_tests_board,
     parse_time,
+    student_groups,
 )
 from custom_components.webtop.timetable import (
     STATE_BREAK,
@@ -26,7 +28,7 @@ from custom_components.webtop.timetable import (
     webtop_weekday,
 )
 
-from .conftest import CHANGES, GRADES, LESSONS_WEEK, TESTS_BOARD, TIMETABLE
+from .conftest import CHANGES, GRADES, GRADES_CARD, LESSONS_WEEK, TESTS_BOARD, TIMETABLE
 
 TZ = ZoneInfo("Asia/Jerusalem")
 BELL = parse_bell_schedule(TESTS_BOARD["data"])
@@ -129,37 +131,70 @@ def test_parallel_groups_share_a_slot() -> None:
 
 def test_tests_board() -> None:
     items = parse_tests_board(TESTS_BOARD["data"])
-    assert [(e.kind, e.subject or e.title, e.start_date.isoformat()) for e in items] == [
-        ("exam", "מתמטיקה", "2026-11-05"),
-        ("exam", "אנגלית", "2026-11-12"),
-        ("exam", "היסטוריה", "2026-11-18"),
-        ("event", "יום ספורט", "2026-11-20"),
-        ("exam", "מדעים", "2026-11-25"),
-        ("vacation", "חופשת חנוכה", "2026-12-15"),
+    assert [(e.kind, e.type, e.subject, e.title, e.start_date.isoformat()) for e in items] == [
+        ("exam", "מבחן", "מתמטיקה", "שברים", "2026-11-05"),
+        ("exam", "בוחן", "אנגלית", "אוצר מילים", "2026-11-12"),
+        ("exam", "מבחן", "היסטוריה", "פרקים 4-6", "2026-11-18"),  # subject resolved from subjectID
+        ("exam", "עבודה להגשה", "תיאטרון", "מונולוג", "2026-11-19"),
+        ("event", "", "", "יום ספורט", "2026-11-20"),
+        ("exam", "מבחן", "מדעים", "תאים", "2026-11-25"),
+        ("vacation", "", "", "חופשת חנוכה", "2026-12-15"),
     ]
     history = items[2]
-    assert history.times(BELL) == (dt.time(8, 45), dt.time(10, 35))  # hours 2-3; to_hour is exclusive
-    assert history.as_dict(BELL)["start"] == "08:45" and history.note == "פרקים 4-6"
+    assert history.summary == "מבחן: היסטוריה - פרקים 4-6"
+    # "From lesson 2 to lesson 3" includes lesson 3: the portal labels the end with lesson 3's own name.
+    assert history.times(BELL) == (dt.time(8, 45), dt.time(10, 35))
+    assert items[1].times(BELL) == (dt.time(8, 0), dt.time(8, 45))  # from 1 to 1 is one lesson
+    assert history.as_dict(BELL)["start"] == "08:45" and history.as_dict(BELL)["summary"] == history.summary
+    assert items[4].summary == "יום ספורט" and items[4].times(BELL) == (dt.time(8, 0), dt.time(11, 20))
     assert items[-1].end_date == dt.date(2026, 12, 22) and items[-1].times(BELL) is None
-    third_grader = Student(student_id="x", key="1", class_code=3, class_number=2)
-    sixth_grader = Student(student_id="y", key="2", class_code=6, class_number=1)
-    assert [e.subject for e in items if e.kind == "exam" and e.applies_to(third_grader)] == [
-        "מתמטיקה", "אנגלית", "היסטוריה",
-    ]  # fmt: skip
-    assert [e.subject for e in items if e.kind == "exam" and e.applies_to(sixth_grader)] == ["מדעים"]
-    assert all(e.applies_to(third_grader) for e in items if e.kind != "exam")  # whole-school items
+    assert len({e.identity() for e in items}) == len(items)
     assert parse_tests_board(None) == [] and parse_tests_board({"exams": [{"title": "no date"}]}) == []
 
 
+def test_exams_are_matched_by_study_group_before_class() -> None:
+    items = [e for e in parse_tests_board(TESTS_BOARD["data"]) if e.kind == "exam"]
+    third_grader = Student(student_id="x", key="1", class_code=3, class_number=2)
+    sixth_grader = Student(student_id="y", key="2", class_code=6, class_number=1)
+    groups = student_groups(parse_schedule(LESSONS_WEEK["data"]))
+
+    # With the child's study groups known: their own groups' exams, plus class-wide ones.
+    # The elective lists class 3/2 but belongs to a group the child is not in.
+    assert [e.subject for e in items if e.applies_to(third_grader, groups)] == ["מתמטיקה", "אנגלית", "היסטוריה"]
+    # Without groups (no timetable available) the class list is all there is to go on.
+    assert [e.subject for e in items if e.applies_to(third_grader)] == ["מתמטיקה", "אנגלית", "היסטוריה", "תיאטרון"]
+    assert [e.subject for e in items if e.applies_to(sixth_grader)] == ["מדעים"]
+    # Whole-school items apply to everyone.
+    others = [e for e in parse_tests_board(TESTS_BOARD["data"]) if e.kind != "exam"]
+    assert all(e.applies_to(third_grader, groups) and e.applies_to(sixth_grader) for e in others)
+
+
 def test_grades_newest_first() -> None:
-    grades = parse_grades(GRADES["data"])
-    assert [(g.subject, g.grade, g.date[:10]) for g in grades] == [
+    card = parse_grades(GRADES_CARD["data"])
+    assert [(g.subject, g.grade, g.date[:10]) for g in card] == [
         ("מדעים", "92", "2026-11-03"),
         ("אנגלית", "78", "2026-10-20"),
-    ]
-    assert grades[0].teacher == "שפירא נועה" and grades[0].remark == "כל הכבוד" and grades[0].weight == "10"
-    assert grades[0].identity() != grades[1].identity()
+    ]  # the unmarked history evaluation is not a grade yet
+    assert card[0].teacher == "שפירא נועה" and card[0].remark == "כל הכבוד" and card[0].weight == "10"
+    assert card[0].as_dict()["date"] == "2026-11-03"
+    assert [g.grade for g in parse_grades(GRADES["data"])] == ["92", "78"]  # the dashboard nests a dataTable
+    # A corrected mark is a new sighting; the same mark is not.
+    changed = parse_grades([{**GRADES_CARD["data"][1], "grade": 95}])[0]
+    assert changed.identity() != card[0].identity()
+    assert parse_grades([dict(GRADES_CARD["data"][1])])[0].identity() == card[0].identity()
+    # A verbal mark and a study level.
+    verbal = parse_grades([{"subject": "אנגלית", "level": "5 יחל", "grade": None, "gradeTranslation": "טוב מאוד"}])[0]
+    assert (verbal.subject, verbal.grade) == ("אנגלית (5 יחל)", "טוב מאוד")
     assert parse_grades({"dataTable": [{"subject": "x"}, None]}) == [] and parse_grades(None) == []
+
+
+def test_pending_evaluations_are_the_unmarked_rows() -> None:
+    pending = parse_pending_evaluations(GRADES_CARD["data"])
+    assert [(e.kind, e.type, e.subject, e.title, e.start_date.isoformat()) for e in pending] == [
+        ("exam", "בוחן", "היסטוריה", "מבחן", "2026-11-08")
+    ]
+    assert pending[0].times(BELL) is None and pending[0].summary == "בוחן: היסטוריה - מבחן"
+    assert parse_pending_evaluations(GRADES["data"]) == [] and parse_pending_evaluations(None) == []
 
 
 def test_changes_ordered_by_hour() -> None:

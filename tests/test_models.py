@@ -12,6 +12,7 @@ from custom_components.webtop.models import (
     WebtopApiError,
     board_available,
     dashboard_allows,
+    fill_rooms,
     homework_from_lessons,
     is_no_homework,
     parse_bell_schedule,
@@ -25,6 +26,7 @@ from custom_components.webtop.models import (
     parse_students,
     parse_unread_count,
     student_from_login,
+    student_groups,
     unwrap,
     view_allowed,
 )
@@ -46,6 +48,7 @@ from .conftest import (
     TESTS_BOARD,
     TESTS_BOARD_UNUSED,
     TIMETABLE,
+    TIMETABLE_WITH_LABELS,
     WEEKLY,
     WEEKLY_WITHOUT_TIMES,
 )
@@ -150,7 +153,8 @@ def test_parse_standing_timetable_by_weekday():
         ("", 3, 2, "אנגלית"),
         ("", 4, 1, "מתמטיקה"),
     ]
-    assert lessons[0].teacher == "כהן רחל" and lessons[0].room == ""
+    assert lessons[0].teacher == "כהן רחל"
+    assert [x.room for x in lessons] == ["חדר 12", "מעבדה 3", ""]
 
 
 def test_parse_schedule_reads_a_lessons_own_times():
@@ -279,13 +283,51 @@ def test_parse_discipline_tolerates_other_shapes():
     assert parse_discipline(None) == []
 
 
+# --- rooms and study groups -------------------------------------------------
+def test_rooms_are_copied_from_the_standing_timetable():
+    week = parse_schedule(LESSONS_WEEK["data"])
+    assert all(not lesson.room for lesson in week)
+    fill_rooms(week, parse_schedule(TIMETABLE["data"]))
+    assert [(x.date[:10], x.hour, x.room) for x in week] == [
+        ("2026-11-09", 1, ""),  # Monday is not on the standing timetable
+        ("2026-11-10", 1, "חדר 12"),
+        ("2026-11-10", 2, "מעבדה 3"),
+        ("2026-11-11", 1, ""),  # the timetable has that slot, but without a room
+    ]
+
+
+def test_parallel_lessons_need_a_matching_subject_to_take_a_room():
+    standing = parse_schedule(
+        [{"dayIndex": 3, "hoursData": [{"hour": 1, "scheduale": [
+            {"day": 3, "hour": 1, "subject": "אנגלית 5", "room": "101"},
+            {"day": 3, "hour": 1, "subject": "אנגלית 4", "room": "102"},
+        ]}]}]
+    )  # fmt: skip
+    week = parse_schedule(
+        [{"date": "2026-11-10T00:00:00", "dayIndex": 3, "hoursData": [{"hour": 1, "scheduale": [
+            {"subject_name": "אנגלית 4", "hour_no": 1}, {"subject_name": "ספרות", "hour_no": 1},
+        ]}]}]
+    )  # fmt: skip
+    fill_rooms(week, standing)
+    assert [x.room for x in week] == ["102", ""]
+
+
+def test_student_groups_come_from_lessons():
+    assert student_groups(parse_schedule(LESSONS_WEEK["data"])) == frozenset({3001, 3002, 3003, 3004})
+    assert student_groups(parse_schedule(TIMETABLE["data"])) == frozenset()  # that view has no group ids
+
+
 # --- lesson times -----------------------------------------------------------
 def test_bell_schedule_sources():
     expected_third = (dt.time(9, 50), dt.time(10, 35))
     board = parse_bell_schedule(TESTS_BOARD["data"])
     weekly = parse_bell_schedule(WEEKLY["data"])  # nested at data.data.events.hours
-    assert sorted(board) == sorted(weekly) == [1, 2, 3, 4]
-    assert board[3] == weekly[3] == expected_third
+    labels = parse_bell_schedule(TIMETABLE_WITH_LABELS["data"])  # read off "3. 10:35-9:50"
+    assert sorted(weekly) == [1, 2, 3, 4] and sorted(labels) == [1, 2, 3]
+    assert board[3] == weekly[3] == labels[3] == expected_third
+    # A slot whose times are ":" still counts when its label carries them.
+    assert sorted(board) == [1, 2, 3, 4, 5] and board[5] == (dt.time(11, 40), dt.time(12, 25))
+    assert parse_bell_schedule(TIMETABLE["data"]) == {}  # labels are null at some schools
     # A school that never entered its times answers ":" for every lesson.
     assert parse_bell_schedule(WEEKLY_WITHOUT_TIMES["data"]) == {}
     assert parse_bell_schedule(TESTS_BOARD_UNUSED["data"]) == {}

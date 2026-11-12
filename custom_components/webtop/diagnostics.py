@@ -52,6 +52,12 @@ TO_REDACT = {
     "homeworkData",
     "homeWork",
     "descClass",
+    "title",
+    "groups",
+    "gradeTranslation",
+    "assessment",
+    "componentComment",
+    "reExaminationNote",
     "message",
     "extra_data",
     "moduleNavigation",
@@ -114,6 +120,8 @@ async def async_get_config_entry_diagnostics(
                     kind: sum(1 for e in data.calendar.get(s.key, []) if e.kind == kind)
                     for kind in ("exam", "event", "vacation")
                 },
+                "study_groups": len(data.groups.get(s.key, ())),
+                "pending_evaluations": len(data.pending[s.key]) if s.key in data.pending else None,
                 "grades_ok": data.grades_ok.get(s.key),
                 "grades": len(data.grades.get(s.key, [])),
                 "changes_ok": data.changes_ok.get(s.key),

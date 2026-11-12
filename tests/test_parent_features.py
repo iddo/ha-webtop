@@ -12,7 +12,14 @@ from pytest_homeassistant_custom_component.common import async_capture_events, a
 from custom_components.webtop.const import CONF_LESSON_TIMES, CONF_SCAN_INTERVAL, EVENT_NEW_GRADE, EVENT_NEW_TEST
 from custom_components.webtop.diagnostics import async_get_config_entry_diagnostics
 
-from .conftest import GRADES, TESTS_BOARD, TESTS_BOARD_UNUSED, WEEKLY_WITHOUT_TIMES
+from .conftest import (
+    GRADES_CARD,
+    TESTS_BOARD,
+    TESTS_BOARD_UNUSED,
+    TIMETABLE_WITH_LABELS,
+    WEEKLY_WITHOUT_TIMES,
+    _exam,
+)
 
 LESSON = "sensor.nv_m_lvy_current_lesson"
 
@@ -93,9 +100,8 @@ async def test_lesson_times_fall_back_to_the_weekly_schedule(
     freezer.move_to("2026-11-10 08:10:00+02:00")
     await _setup(hass, config_entry)
     assert hass.states.get(LESSON).state == "מתמטיקה"
-    # No board: tests are unknown rather than a misleading zero.
-    assert hass.states.get("sensor.nv_m_lvy_next_test").state == "unknown"
-    assert hass.states.get("sensor.nv_m_lvy_upcoming_tests").state == "unknown"
+    # No board: without the pupil card either, tests are unknown rather than a misleading zero.
+    assert hass.states.get("sensor.myh_lvy_upcoming_tests").state == "0"  # card readable, nothing pending
 
     client = fake_client.created[0]
     assert len([c for c in client.calls if c[0] == "EventsTestsBoard"]) == 1  # not once per month
@@ -163,14 +169,16 @@ async def test_test_grade_and_change_sensors(hass: HomeAssistant, fake_client, c
 
     next_test = hass.states.get("sensor.nv_m_lvy_next_test")
     assert next_test.state == "2026-11-12"  # the 5 November exam is in the past
-    assert next_test.attributes["subject"] == "אנגלית"
+    assert next_test.attributes["summary"] == "בוחן: אנגלית - אוצר מילים"
+    assert (next_test.attributes["type"], next_test.attributes["subject"]) == ("בוחן", "אנגלית")
     assert (next_test.attributes["start"], next_test.attributes["end"]) == ("08:00", "08:45")
     assert next_test.attributes["days_until"] == 2
 
     upcoming = hass.states.get("sensor.nv_m_lvy_upcoming_tests")
     assert upcoming.state == "2"
+    # Not the theatre assignment: it lists the class, but the child is not in that study group.
     assert [t["subject"] for t in upcoming.attributes["tests"]] == ["אנגלית", "היסטוריה"]
-    # The sibling in another class sees only her own exam.
+    # The sibling's week is empty, so her study groups are unknown and her class decides.
     assert hass.states.get("sensor.myh_lvy_upcoming_tests").state == "1"
     assert hass.states.get("sensor.myh_lvy_next_test").state == "2026-11-25"
 
@@ -191,14 +199,62 @@ async def test_test_grade_and_change_sensors(hass: HomeAssistant, fake_client, c
     assert len(board_calls) == 2
     assert board_calls[0][1]["institutionCode"] == 440099 and board_calls[0][1]["selectedView"] == 3
     assert [c[1]["selectedDate"][:7] for c in board_calls] == ["2026-11", "2026-12"]
-    assert len([c for c in client.calls if c[0] == "GetGrades"]) == 2
+    # Grades come from the pupil card (the whole year), once per child.
+    assert len([c for c in client.calls if c[0] == "GetPupilGrades"]) == 2
+    assert not [c for c in client.calls if c[0] == "GetGrades"]
+
+
+async def test_lesson_times_can_come_from_the_timetables_own_labels(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
+) -> None:
+    fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
+    fake_client.responses["get_pupil_schedule"] = TIMETABLE_WITH_LABELS
+    freezer.move_to("2026-11-10 08:10:00+02:00")
+    await _setup(hass, config_entry)
+    state = hass.states.get(LESSON)
+    assert state.state == "מתמטיקה" and state.attributes["room"] == "חדר 12"
+    assert state.attributes["end"] == "2026-11-10T08:45:00+02:00"
+    assert not [c for c in fake_client.created[0].calls if c[0] == "WeeklySchedualeForToday"]
+
+
+async def test_without_a_tests_board_pending_evaluations_are_the_upcoming_tests(
+    hass: HomeAssistant, fake_client, config_entry, in_israel
+) -> None:
+    fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
+    pending = [
+        *GRADES_CARD["data"],  # includes a history test on 8 November that is still unmarked
+        {**GRADES_CARD["data"][2], "evaluationID": 704, "subject": "תנ\"ך", "title": "מבחן מסכם", "type": "מבחן",
+         "date": "2026-11-24T00:00:00"},
+    ]  # fmt: skip
+    fake_client.responses["GetPupilGrades"] = {"status": True, "data": pending}
+    await _setup(hass, config_entry)
+
+    next_test = hass.states.get("sensor.nv_m_lvy_next_test")
+    assert next_test.state == "2026-11-24"  # the 8 November one is in the past
+    assert next_test.attributes["summary"] == 'מבחן: תנ"ך - מבחן מסכם'
+    assert next_test.attributes["start"] == ""  # the pupil card has no lesson numbers
+    assert hass.states.get("sensor.nv_m_lvy_upcoming_tests").state == "1"
+    assert hass.states.get("sensor.nv_m_lvy_latest_grade").state == "92"
+    calendar = hass.states.get("calendar.nv_m_lvy_school_calendar")
+    assert calendar.attributes["all_day"] is True and calendar.attributes["message"] == 'מבחן: תנ"ך - מבחן מסכם'
+
+
+async def test_without_board_or_pupil_card_tests_are_unknown(
+    hass: HomeAssistant, fake_client, config_entry, in_israel
+) -> None:
+    fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
+    fake_client.responses["GetPupilGrades"] = {"status": False, "errorDescription": "view is blocked"}
+    await _setup(hass, config_entry)
+    assert hass.states.get("sensor.nv_m_lvy_next_test").state == "unknown"
+    assert hass.states.get("sensor.nv_m_lvy_upcoming_tests").state == "unknown"
+    assert hass.states.get("sensor.nv_m_lvy_latest_grade").state == "92"  # the dashboard still has grades
 
 
 async def test_school_calendar(hass: HomeAssistant, fake_client, config_entry, in_israel) -> None:
     await _setup(hass, config_entry)
     calendar = hass.states.get("calendar.nv_m_lvy_school_calendar")
     assert calendar is not None
-    assert calendar.attributes["message"] == "בוחן - אנגלית"
+    assert calendar.attributes["message"] == "בוחן: אנגלית - אוצר מילים"
     assert calendar.attributes["start_time"] == "2026-11-12 08:00:00"
     assert calendar.attributes["all_day"] is False
 
@@ -215,13 +271,12 @@ async def test_school_calendar(hass: HomeAssistant, fake_client, config_entry, i
     )
     events = response["calendar.nv_m_lvy_school_calendar"]["events"]
     assert [(e["summary"], e["start"], e["end"]) for e in events] == [
-        ("מבחן - מתמטיקה", "2026-11-05T08:00:00+02:00", "2026-11-05T09:30:00+02:00"),
-        ("בוחן - אנגלית", "2026-11-12T08:00:00+02:00", "2026-11-12T08:45:00+02:00"),
-        ("מבחן - היסטוריה", "2026-11-18T08:45:00+02:00", "2026-11-18T10:35:00+02:00"),
+        ("מבחן: מתמטיקה - שברים", "2026-11-05T08:00:00+02:00", "2026-11-05T09:30:00+02:00"),
+        ("בוחן: אנגלית - אוצר מילים", "2026-11-12T08:00:00+02:00", "2026-11-12T08:45:00+02:00"),
+        ("מבחן: היסטוריה - פרקים 4-6", "2026-11-18T08:45:00+02:00", "2026-11-18T10:35:00+02:00"),
         ("יום ספורט", "2026-11-20T08:00:00+02:00", "2026-11-20T11:20:00+02:00"),
         ("חופשת חנוכה", "2026-12-15", "2026-12-23"),  # all-day, exclusive end
     ]
-    assert events[2]["description"] == "פרקים 4-6"
 
 
 async def test_new_grade_and_new_test_events(
@@ -233,17 +288,11 @@ async def test_new_grade_and_new_test_events(
     assert grade_events == [] and test_events == []  # the first poll is only a baseline
 
     client = fake_client.created[0]
-    new_grade = {"subject": "היסטוריה", "title": "עבודה", "date": "2026-11-09T00:00:00", "grade": 95}
-    client.responses["GetGrades"] = {
-        "status": True,
-        "data": {"dataTable": [*GRADES["data"]["dataTable"], new_grade]},
-    }
+    # The history evaluation that was waiting for a mark gets one.
+    marked = [{**row, "grade": 95} if row["grade"] is None else row for row in GRADES_CARD["data"]]
+    client.responses["GetPupilGrades"] = {"status": True, "data": marked}
     board = {**TESTS_BOARD["data"]}
-    board["exams"] = [
-        *board["exams"],
-        {"title": "מבחן", "subject": "ספרות", "date": "2026-11-26T00:00:00", "fromHour": 1, "toHour": 3,
-         "classCode": 3, "classNumber": 2},
-    ]  # fmt: skip
+    board["exams"] = [*board["exams"], _exam(506, "2026-11-26", (1, 2), "מבחן", "שירה", subject="ספרות")]
     client.responses["EventsTestsBoard"] = {"status": True, "data": board}
 
     freezer.tick(timedelta(minutes=31))
@@ -272,9 +321,9 @@ async def test_diagnostics_cover_new_data_without_personal_values(
     await _setup(hass, config_entry)
     diag = await async_get_config_entry_diagnostics(hass, config_entry)
     first = diag["students"][0]
-    assert first["bell_schedule_hours"] == [1, 2, 3, 4]
+    assert first["bell_schedule_hours"] == [1, 2, 3, 4, 5]
     assert first["calendar_items"] == {"exam": 3, "event": 1, "vacation": 1}
     assert (first["grades"], first["changes_today"]) == (2, 2)
     dumped = str(diag)
-    for personal in ("שפירא", "כל הכבוד", "440099", "טיול שנתי", "עמוד 45", "92"):
+    for personal in ("שפירא", "כל הכבוד", "440099", "טיול שנתי", "עמוד 45", "92", "אוצר מילים", "קבוצה 3002"):
         assert personal not in dumped, personal

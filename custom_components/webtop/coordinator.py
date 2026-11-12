@@ -53,6 +53,7 @@ from .models import (
     WebtopApiError,
     board_available,
     dashboard_allows,
+    fill_rooms,
     homework_from_lessons,
     parse_bell_schedule,
     parse_changes,
@@ -63,11 +64,13 @@ from .models import (
     parse_menu_counters,
     parse_messages,
     parse_notifications,
+    parse_pending_evaluations,
     parse_schedule,
     parse_students,
     parse_tests_board,
     parse_unread_count,
     student_from_login,
+    student_groups,
     unwrap,
     view_allowed,
 )
@@ -135,6 +138,10 @@ class WebtopData:
     grades_ok: dict[str, bool] = field(default_factory=dict)
     changes: dict[str, list[ScheduleChange]] = field(default_factory=dict)
     changes_ok: dict[str, bool] = field(default_factory=dict)
+    # Study groups each student attends; exams are addressed to study groups.
+    groups: dict[str, frozenset[int]] = field(default_factory=dict)
+    # Evaluations set but not yet marked, from the pupil card (only when it could be read).
+    pending: dict[str, list[SchoolEvent]] = field(default_factory=dict)
     messages: list[Message] = field(default_factory=list)
     # From the portal's menu badges; None when the counters could not be read.
     unread_messages: int | None = None
@@ -146,6 +153,12 @@ class WebtopData:
     def student(self, key: str) -> Student | None:
         return next((s for s in self.students if s.key == key), None)
 
+
+# The WebtopData dictionaries keyed by student, carried over when a school cannot be reached.
+PER_STUDENT_FIELDS = (
+    "homework", "homework_ok", "discipline", "discipline_ok", "schedule", "schedule_ok",
+    "calendar", "calendar_ok", "bell", "grades", "grades_ok", "changes", "changes_ok", "groups", "pending",
+)  # fmt: skip
 
 type WebtopConfigEntry = ConfigEntry[WebtopCoordinator]
 
@@ -176,6 +189,12 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         # Per student: (day fetched, lesson times). Per institution: day it had no tests board.
         self._bell_cache: dict[str, tuple[dt.date, BellSchedule]] = {}
         self._board_unavailable: dict[str, dt.date] = {}
+        # Per student: (day fetched, standing timetable, lesson times read off its labels).
+        self._timetable_cache: dict[str, tuple[dt.date, list[Lesson], BellSchedule]] = {}
+        # Views a school has blocked, by cache key -> the day that was learned.
+        self._blocked: dict[str, dt.date] = {}
+        # Linked login id -> the students found under it, to carry over if a switch fails.
+        self._context_students: dict[str, list[str]] = {}
         self._seen_homework: dict[str, set[str]] = {}
         self._seen_behaviour: dict[str, set[str]] = {}
         self._seen_grades: dict[str, set[str]] = {}
@@ -255,20 +274,37 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             return await self._collect()
 
     async def _optional(
-        self, what: str, call: Callable[[], Awaitable[_T]], *, envelope: str | None = None
+        self,
+        what: str,
+        call: Callable[[], Awaitable[_T]],
+        *,
+        envelope: str | None = None,
+        remember: str | None = None,
     ) -> Any:
         """Run a secondary fetch; a failure there must not discard the rest.
 
         With ``envelope`` set, the response is unwrapped (``status``/``data``)
         and a ``status: false`` counts as a failure too. Session errors still
         propagate so the caller can log in again.
+
+        With ``remember`` set, a view the school has blocked is not requested
+        again until tomorrow: it will not unblock within the day, and asking
+        every poll only adds load and log noise.
         """
+        today = dt_util.now().date()
+        if remember is not None and self._blocked.get(remember) == today:
+            return None
         try:
             result = await call()
             return unwrap(result, envelope) if envelope else result
         except (WebtopRequestError, WebtopApiError) as err:
             if is_auth_error(err):
                 raise
+            if isinstance(err, WebtopApiError) and err.is_blocked_view:
+                if remember is not None:
+                    self._blocked[remember] = today
+                _LOGGER.debug("Webtop %s is switched off by the school (%s)", what, err.description)
+                return None
             _LOGGER.warning("Webtop %s failed; keeping the other data: %s", what, err)
             return None
 
@@ -295,7 +331,10 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
 
         messages: dict[str, Message] = {}
         for context in contexts:
+            context_id = str((context or {}).get("studentId") or "")
             if context is not None and not await self._enter_context(context):
+                # Keep showing that school's last known data rather than dropping its entities.
+                self._carry_over(data, self._context_students.get(context_id, []))
                 continue
             session = client.session
             login_data = session.raw_login_data or {}
@@ -313,12 +352,23 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                 _LOGGER.warning("Webtop dashboard listed no students for this session")
 
             fresh = [s for s in students if not any(known.key == s.key for known in data.students)]
+            self._context_students[context_id] = [s.key for s in fresh]
             board_events, board_bell = await self._collect_tests_board(data, institution, now)
             for student in fresh:  # a child reachable through two contexts is only read once
                 data.students.append(student)
-                data.calendar[student.key] = [e for e in board_events or [] if e.applies_to(student)]
-                data.calendar_ok[student.key] = board_events is not None
                 await self._collect_student(data, student, now=now, institution=institution, dashboard=dashboard)
+                groups = data.groups.get(student.key, frozenset())
+                if board_events is not None:
+                    data.calendar[student.key] = [e for e in board_events if e.applies_to(student, groups)]
+                    data.calendar_ok[student.key] = True
+                elif student.key in data.pending:
+                    # No tests board at this school: the unmarked evaluations on the pupil
+                    # card are the tests that have been set.
+                    data.calendar[student.key] = data.pending[student.key]
+                    data.calendar_ok[student.key] = True
+                else:
+                    data.calendar[student.key] = []
+                    data.calendar_ok[student.key] = False
                 data.bell[student.key] = await self._bell_for(student, board_bell, institution, now)
 
             inbox = unwrap(await client.get_messages_inbox(page_id=1), "GetMessagesInbox")
@@ -333,6 +383,21 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         data.messages = sorted(messages.values(), key=lambda m: m.sent_at, reverse=True)
         data.notifications.sort(key=lambda n: n.date, reverse=True)
         return data
+
+    def _carry_over(self, data: WebtopData, keys: list[str]) -> None:
+        """Copy the previous poll's data for these students into the new snapshot."""
+        previous = self.data
+        if previous is None:
+            return
+        for key in keys:
+            student = previous.student(key)
+            if student is None or data.student(key) is not None:
+                continue
+            data.students.append(student)
+            for name in PER_STUDENT_FIELDS:
+                source = getattr(previous, name)
+                if key in source:
+                    getattr(data, name)[key] = source[key]
 
     async def _enter_context(self, context: dict[str, Any]) -> bool:
         """Switch the session to a linked login; False when that school must be skipped this poll."""
@@ -443,6 +508,9 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             return self._manual_bell
         if board_bell:
             return board_bell
+        timetable = self._timetable_cache.get(student.key)
+        if timetable and timetable[2]:
+            return timetable[2]  # read off the timetable's own lesson labels
         cached = self._bell_cache.get(student.key)
         if cached and cached[0] == now.date():
             return cached[1]
@@ -472,6 +540,28 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         bell = parse_bell_schedule(payload)
         self._bell_cache[student.key] = (now.date(), bell)
         return bell
+
+    async def _standing_timetable(self, student: Student, year: int, now: Any) -> list[Lesson] | None:
+        """The weekday timetable (with rooms). It rarely changes, so it is read once a day."""
+        cached = self._timetable_cache.get(student.key)
+        if cached and cached[0] == now.date():
+            return cached[1]
+        payload = await self._optional(
+            f"timetable for {student.name}",
+            lambda: self.client.get_pupil_schedule(
+                week_index=0,
+                study_year=year,
+                encrypted_student_id=student.student_id,
+                class_code=student.class_code,
+            ),
+            envelope="GetPupilScheduale",
+            remember=f"{student.key}:timetable",
+        )
+        if payload is None:
+            return None
+        lessons = parse_schedule(payload)
+        self._timetable_cache[student.key] = (now.date(), lessons, parse_bell_schedule(payload))
+        return lessons
 
     async def _collect_student(
         self, data: WebtopData, student: Student, *, now: Any, institution: Any, dashboard: Any
@@ -509,15 +599,37 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             f"this week's lessons for {student.name}",
             lambda: self._post("PupilCard/GetPupilLessonsAndHomework", pupil_card),
             envelope="GetPupilLessonsAndHomework",
+            remember=f"{key}:week",
         )
+        standing = await self._standing_timetable(student, year, now)
         if isinstance(week, list):
             data.raw_samples["lessons"] = week
-            data.schedule[key] = parse_schedule(week)
+            lessons = parse_schedule(week)
+            fill_rooms(lessons, standing or [])
+            data.schedule[key] = lessons
             data.schedule_ok[key] = True
-            data.homework[key] = homework_from_lessons(data.schedule[key])
+            data.homework[key] = homework_from_lessons(lessons)
             data.homework_ok[key] = True
         else:
-            await self._collect_fallback_week(data, student, today=today, year=year, dashboard=dashboard)
+            # No dated week: the standing timetable, and today's homework from the dashboard.
+            if standing is not None:
+                data.schedule[key] = standing
+                data.schedule_ok[key] = True
+            if dashboard_allows(dashboard, "allowGetHomeWork"):
+                payload = await self._optional(
+                    f"homework for {student.name}",
+                    lambda: client.get_homework(
+                        encrypted_student_id=student.student_id,
+                        class_code=student.class_code,
+                        class_number=student.class_number if student.class_number is not None else 0,
+                    ),
+                    envelope="GetHomeWork",
+                )
+                if payload is not None and view_allowed(payload):
+                    data.raw_samples["homework"] = payload
+                    data.homework[key] = parse_homework(payload, date=today)
+                    data.homework_ok[key] = True
+        data.groups[key] = student_groups(data.schedule[key]) | student_groups(standing or [])
 
         if dashboard_allows(dashboard, "allowGetPupilDiciplineEvents"):
             # The pupil card lists the whole year; the dashboard widget only the latest few.
@@ -525,6 +637,7 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                 f"behaviour events for {student.name}",
                 lambda: self._post("PupilCard/GetPupilDiciplineEvents", pupil_card),
                 envelope="GetPupilDiciplineEvents",
+                remember=f"{key}:behaviour",
             )
             if payload is None:
                 payload = await self._optional(
@@ -540,11 +653,23 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                 data.discipline_ok[key] = True
 
         if dashboard_allows(dashboard, "allowGetGrades"):
+            # Same split: every mark of the year on the pupil card, the latest few on the dashboard.
             payload = await self._optional(
                 f"grades for {student.name}",
-                lambda: self._post("dashboard/GetGrades", {"id": student.student_id, "ClassCode": student.class_code}),
-                envelope="GetGrades",
+                lambda: self._post("PupilCard/GetPupilGrades", pupil_card),
+                envelope="GetPupilGrades",
+                remember=f"{key}:grades",
             )
+            if payload is not None:
+                data.pending[key] = parse_pending_evaluations(payload)
+            else:
+                payload = await self._optional(
+                    f"recent grades for {student.name}",
+                    lambda: self._post(
+                        "dashboard/GetGrades", {"id": student.student_id, "ClassCode": student.class_code}
+                    ),
+                    envelope="GetGrades",
+                )
             if payload is not None and view_allowed(payload):
                 data.raw_samples["grades"] = payload
                 data.grades[key] = parse_grades(payload)
@@ -570,43 +695,6 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                 data.raw_samples["changes"] = payload
                 data.changes[key] = parse_changes(payload)
                 data.changes_ok[key] = True
-
-    async def _collect_fallback_week(
-        self, data: WebtopData, student: Student, *, today: str, year: int, dashboard: Any
-    ) -> None:
-        """When the dated week is unavailable: the standing timetable, and today's homework only."""
-        client = self.client
-        key = student.key
-        payload = await self._optional(
-            f"timetable for {student.name}",
-            lambda: client.get_pupil_schedule(
-                week_index=0,
-                study_year=year,
-                encrypted_student_id=student.student_id,
-                class_code=student.class_code,
-            ),
-            envelope="GetPupilScheduale",
-        )
-        if payload is not None:
-            data.raw_samples["schedule"] = payload
-            data.schedule[key] = parse_schedule(payload)
-            data.schedule_ok[key] = True
-
-        if not dashboard_allows(dashboard, "allowGetHomeWork"):
-            return
-        payload = await self._optional(
-            f"homework for {student.name}",
-            lambda: client.get_homework(
-                encrypted_student_id=student.student_id,
-                class_code=student.class_code,
-                class_number=student.class_number if student.class_number is not None else 0,
-            ),
-            envelope="GetHomeWork",
-        )
-        if payload is not None and view_allowed(payload):
-            data.raw_samples["homework"] = payload
-            data.homework[key] = parse_homework(payload, date=today)
-            data.homework_ok[key] = True
 
     # ------------------------------------------------------------------
     # events

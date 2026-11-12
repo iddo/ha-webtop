@@ -16,15 +16,15 @@ One **account device** and one **device per student**.
 | Entity | Device | State | Attributes |
 | --- | --- | --- | --- |
 | Current lesson | student | the subject being taught right now, `Break` between lessons, `No lesson` outside school hours | teacher, topic, room, hour, start, end, changed, next_subject, next_start, lessons_today, times_known |
-| Next test | student | date of the next exam for the student's class | title, subject, start, end, from_hour, to_hour, note, days_until |
+| Next test | student | date of the next exam, quiz or assignment set for the student | summary, type, title, subject, start, end, from_hour, to_hour, room, note, days_until |
 | Upcoming tests | student | number of exams from today onward | `tests` list |
-| Latest grade | student | the most recent mark | subject, title, type, date, weight, teacher, remark, `recent` list |
+| Latest grade | student | the most recent mark | subject, title, type, date, weight, teacher, remark, `recent` list (the school year) |
 | Schedule changes today | student | substitutions, cancellations, exams and notices on today's board | `changes` (kind, text, hour, teacher, room, note) |
 | Homework today | student | homework written on today's lessons | `items` (date, hour, subject, teacher, homework), `text`, `week` (everything from this week's lessons), `week_count` |
 | Behaviour events | student | behaviour records from the last 7 days, commendations included | `today`, `total` (school year), `by_type`, `events` (date, hour, event, subject, teacher, remark, justified) |
 | Lessons today | student | number of lessons today | `today`, `week` (date, hour, subject, teacher, topic, room, start, end) |
 | Class | student (diagnostic) | class, e.g. `ג'2` | school, class code/number, study year |
-| School calendar | student (calendar) | exams, school events and vacations for the student's class | standard calendar events; timed when lesson numbers are known |
+| School calendar | student (calendar) | exams, school events and vacations for the student | standard calendar events; timed when lesson numbers are known, with the room as location |
 | Unread messages | account | the portal's unread-messages badge | `total`, `messages` (subject, sender, sent_at, read/attachment flags, student) |
 | Last message | account | subject of the newest message | sender, sent_at, flags |
 | Unread notifications | account | the portal's unread-notifications badge | `latest` (date, message, module, kind) |
@@ -35,10 +35,11 @@ The **Current lesson** sensor changes state at the exact minute a lesson
 starts or ends, using the timetable and the school's bell schedule. It runs
 on its own timer, so it does not wait for the next poll. Open the entity's
 history (or add a History graph card) to see the day as a strip of subjects.
-Lesson times come from the portal when the school publishes them. Many do
-not: the portal then answers `:` for every lesson, the state is `unknown` and
-the `times_known` attribute is `false`. In that case open the integration's
-**Configure** dialog and type the school's lesson times once, in lesson order:
+Lesson times come from the portal when the school publishes them: on its
+tests board, on the labels of its timetable, or on its weekly schedule. Some
+schools publish none. The state is then `unknown` and the `times_known`
+attribute is `false`. In that case open the integration's **Configure**
+dialog and type the school's lesson times once, in lesson order:
 
 ```text
 08:00-08:45, 08:45-09:30, 09:50-10:35, 10:35-11:20, 11:40-12:25, 12:25-13:10
@@ -125,15 +126,23 @@ integrations page.
 - **pywebtop's built-in `Data` default is not used.** It is the value for one
   particular username. The integration computes `Data` per login from the
   username and the server's login counter (see `auth.py`).
-- **What has been checked against a real account, and what has not.** A
-  capture from one primary-school account confirmed login, student discovery,
-  the dated week of lessons with homework and topics, the standing timetable,
-  behaviour events, the inbox, notifications and menu badges. That school does
-  not use the tests board, grades or the daily changes board and publishes no
-  lesson times, so **tests, grades, schedule changes and portal-supplied
-  lesson times still follow the web client's code only**. Switching between
-  linked schools is also unconfirmed. Run the capture tool below on an account
-  that has them to confirm or correct these.
+- **What has been checked against a real account, and what has not.**
+  Captures from one parent account with children in three schools confirmed
+  login, switching between linked schools, student discovery, the dated week
+  of lessons with homework and topics, the standing timetable with rooms,
+  lesson times, behaviour events, grades, exams on the tests board, the inbox,
+  notifications and menu badges. Those captures contained **no schedule
+  changes, school events or vacations**, so those rows still follow the web
+  client's code only.
+- **Tests are matched to the student by study group.** An exam for an
+  elective lists every class its pupils come from, so the integration shows
+  it only if the student has a lesson in that study group. When the student's
+  groups are unknown it falls back to the class list. A school without a
+  tests board still shows tests when the pupil card lists evaluations that
+  have been set but not yet marked.
+- **A view the school has blocked is asked for once a day,** not every poll.
+- **If switching to one of several linked schools fails,** that school keeps
+  its last known values until the next successful poll.
 - **A feature the school has switched off shows `unknown`,** not zero. The
   portal says which widgets are allowed, and the integration does not request
   the others.
