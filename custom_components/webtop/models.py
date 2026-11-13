@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,8 +103,14 @@ def _digest(*parts: str) -> str:
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+# Hebrew vowel points and cantillation, and invisible direction / zero-width marks.
+_NAME_NOISE_RE = re.compile("[\u0591-\u05c7\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
 def normalize_name(name: str | None) -> str:
-    return " ".join((name or "").split()).casefold()
+    """A form of a name that survives spacing, case, vowel points and stray direction marks."""
+    cleaned = _NAME_NOISE_RE.sub("", unicodedata.normalize("NFKC", name or ""))
+    return " ".join(cleaned.split()).casefold()
 
 
 _TIME_IN_TEXT_RE = re.compile(r"(?:^|[T ])(\d{1,2})[:.](\d{2})(?::\d{2})?")
@@ -314,6 +321,8 @@ class HomeworkItem:
     hour: int | None = None
     status: str = ""
     date: str = ""
+    # Every lesson number of the day the same homework was written on (a double lesson has two).
+    hours: list[int] = field(default_factory=list)
 
     def identity(self) -> str:
         return _digest(self.subject, self.homework, self.date[:10])
@@ -322,6 +331,7 @@ class HomeworkItem:
         return {
             "date": self.date[:10],
             "hour": self.hour,
+            "hours": self.hours or ([self.hour] if self.hour is not None else []),
             "subject": self.subject,
             "teacher": self.teacher,
             "homework": self.homework,
@@ -366,20 +376,29 @@ def parse_homework(data: Any, *, date: str) -> list[HomeworkItem]:
 
 
 def homework_from_lessons(lessons: list[Any]) -> list[HomeworkItem]:
-    """Homework written on this week's lessons (``GetPupilLessonsAndHomework``)."""
-    items = [
-        HomeworkItem(
-            subject=lesson.subject,
-            homework=lesson.homework,
-            teacher=lesson.teacher,
-            hour=lesson.hour,
-            date=lesson.date,
-        )
-        for lesson in lessons
-        if lesson.date and not is_no_homework(lesson.homework)
-    ]
-    items.sort(key=lambda h: (h.date, h.hour if h.hour is not None else 99))
-    return items
+    """Homework written on dated lessons (``GetPupilLessonsAndHomework``), oldest first.
+
+    A teacher fills in the same text on each lesson of a double period, so entries for
+    the same day, subject and text are one assignment listing every lesson number.
+    """
+    merged: dict[tuple[str, str, str], HomeworkItem] = {}
+    ordered = sorted(lessons, key=lambda x: (x.date, x.hour if x.hour is not None else 99))
+    for lesson in ordered:
+        if not lesson.date or is_no_homework(lesson.homework):
+            continue
+        key = (lesson.date[:10], normalize_name(lesson.subject), " ".join(lesson.homework.split()))
+        item = merged.get(key)
+        if item is None:
+            item = merged[key] = HomeworkItem(
+                subject=lesson.subject,
+                homework=lesson.homework,
+                teacher=lesson.teacher,
+                hour=lesson.hour,
+                date=lesson.date,
+            )
+        if lesson.hour is not None and lesson.hour not in item.hours:
+            item.hours.append(lesson.hour)
+    return list(merged.values())
 
 
 # ---------------------------------------------------------------------------

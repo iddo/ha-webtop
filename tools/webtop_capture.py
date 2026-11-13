@@ -40,6 +40,7 @@ from webtop import WebtopClient, WebtopError, WebtopLoginError
 
 from custom_components.webtop import models
 from custom_components.webtop.auth import BASE_URL, compute_login_data
+from custom_components.webtop.const import MODULE_BEHAVIOUR, MODULE_GRADES, MODULE_TIMETABLE, MODULE_WEEK
 from tools.anonymizer import LocalLLM, anonymize_documents, discover_local_llm
 
 API = "/server/api/"
@@ -58,14 +59,16 @@ class Endpoint:
 
 SELECTED_CLASS = "{class_code}|{class_number}"
 SELECTED_STUDENT = "{class_code}|{class_number}|{student_id}"
-PUPIL_CARD = {
-    "weekIndex": 0,
-    "viewType": 0,
-    "studyYear": "{study_year}",
-    "studentID": "{student_id}",
-    "classCode": "{class_code}",
-    "moduleID": 10,
-}
+def pupil_card(module: int, week_index: int = 0) -> dict[str, Any]:
+    """A pupil-card request. Each view has its own module id, granted separately by the school."""
+    return {
+        "weekIndex": week_index,
+        "viewType": 0,
+        "studyYear": "{study_year}",
+        "studentID": "{student_id}",
+        "classCode": "{class_code}",
+        "moduleID": module,
+    }
 
 # Asked once, before any switching: the logins linked to this account (one per school).
 LINKED = Endpoint("linked_students", "user/GetMultipleUsersForUser", {})
@@ -163,12 +166,31 @@ ENDPOINTS: tuple[Endpoint, ...] = (
         },
         per_student=True,
     ),
-    Endpoint("pupil_schedule", "PupilCard/GetPupilScheduale", PUPIL_CARD, per_student=True),
-    Endpoint("pupil_lessons_homework", "PupilCard/GetPupilLessonsAndHomework", PUPIL_CARD, per_student=True),
-    Endpoint("pupil_grades", "PupilCard/GetPupilGrades", PUPIL_CARD, per_student=True),
-    Endpoint("pupil_period_grades", "PupilCard/GetPupilPeriodGrades", PUPIL_CARD, per_student=True),
-    Endpoint("pupil_discipline", "PupilCard/GetPupilDiciplineEvents", PUPIL_CARD, per_student=True),
-    Endpoint("pupil_previous_homework", "PupilCard/GetPreviousHomeworks", PUPIL_CARD, per_student=True),
+    Endpoint("pupil_schedule", "PupilCard/GetPupilScheduale", pupil_card(MODULE_TIMETABLE), per_student=True),
+    Endpoint(
+        "pupil_lessons_homework", "PupilCard/GetPupilLessonsAndHomework", pupil_card(MODULE_WEEK), per_student=True
+    ),
+    Endpoint(
+        "pupil_lessons_homework_last_week",
+        "PupilCard/GetPupilLessonsAndHomework",
+        pupil_card(MODULE_WEEK, week_index=-1),
+        per_student=True,
+    ),
+    Endpoint("pupil_grades", "PupilCard/GetPupilGrades", pupil_card(MODULE_GRADES), per_student=True),
+    Endpoint("pupil_period_grades", "PupilCard/GetPupilPeriodGrades", pupil_card(7), per_student=True),
+    Endpoint("pupil_discipline", "PupilCard/GetPupilDiciplineEvents", pupil_card(MODULE_BEHAVIOUR), per_student=True),
+    Endpoint("pupil_previous_homework", "PupilCard/GetPreviousHomeworks", pupil_card(MODULE_WEEK), per_student=True),
+    # Earlier versions sent the timetable's module id to every view. Kept as a comparison,
+    # to see whether a school that blocks these under that id allows them under their own.
+    Endpoint(
+        "pupil_grades_with_timetable_module", "PupilCard/GetPupilGrades", pupil_card(MODULE_TIMETABLE), per_student=True
+    ),
+    Endpoint(
+        "pupil_discipline_with_timetable_module",
+        "PupilCard/GetPupilDiciplineEvents",
+        pupil_card(MODULE_TIMETABLE),
+        per_student=True,
+    ),
 )
 
 
@@ -228,15 +250,18 @@ def parser_summary(name: str, data: Any, today: str) -> dict[str, Any] | None:
             }
         if base == "homework_today":
             return {"allowed": models.view_allowed(data), "homework": len(models.parse_homework(data, date=today))}
-        if base in ("discipline_dashboard", "pupil_discipline"):
+        if base in ("discipline_dashboard", "pupil_discipline", "pupil_discipline_with_timetable_module"):
             return {"allowed": models.view_allowed(data), "events": len(models.parse_discipline(data))}
-        if base in ("grades_latest", "pupil_grades", "pupil_period_grades"):
+        if base in ("grades_latest", "pupil_grades", "pupil_period_grades", "pupil_grades_with_timetable_module"):
             return {"allowed": models.view_allowed(data), "grades": len(models.parse_grades(data))}
         if base in ("changes_today", "changes_week"):
             return {"allowed": models.view_allowed(data), "changes": len(models.parse_changes(data))}
         if base == "weekly_schedule_today":
             return {"bell_hours": len(models.parse_bell_schedule(data))}
-        if base in ("pupil_schedule", "pupil_lessons_homework", "schedule_today", "class_schedule"):
+        if base in (
+            "pupil_schedule", "pupil_lessons_homework", "pupil_lessons_homework_last_week", "schedule_today",
+            "class_schedule",
+        ):  # fmt: skip
             lessons = models.parse_schedule(data)
             homework = [h.homework for h in models.homework_from_lessons(lessons)]
             return {

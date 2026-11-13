@@ -403,7 +403,29 @@ CHANGES = {
 
 
 def _week_for(payload: dict[str, Any]) -> dict[str, Any]:
-    return LESSONS_WEEK if payload.get("studentID") == ENCRYPTED_ID_A else LESSONS_WEEK_EMPTY
+    """Student A's current week; an empty week for anyone else and for other weeks."""
+    if payload.get("studentID") == ENCRYPTED_ID_A and payload.get("weekIndex", 0) == 0:
+        return LESSONS_WEEK
+    return LESSONS_WEEK_EMPTY
+
+
+# The week before LESSONS_WEEK (weekIndex -1): homework given on Thursday 5 November,
+# written on both lessons of a double period.
+LAST_WEEK = {
+    "status": True,
+    "data": [
+        {
+            "date": "2026-11-05T00:00:00+02:00",
+            "dayIndex": 5,
+            "hoursData": [
+                {"hour": 3, "hourName": None,
+                 "scheduale": [_week_lesson(5, 3, "מדעים", "יעל", "להכין מצגת על מחזור המים", "מחזור המים")]},
+                {"hour": 4, "hourName": None,
+                 "scheduale": [_week_lesson(5, 4, "מדעים", "יעל", "להכין מצגת על מחזור המים", "מחזור המים")]},
+            ],
+        }
+    ],
+}  # fmt: skip
 
 
 # Defaults for request(), keyed by the last path segment. A callable picks by request payload.
@@ -545,6 +567,10 @@ class FakeWebtopClient:
         """Endpoints pywebtop has no method for, keyed by the last path segment."""
         name = path.rsplit("/", 1)[-1]
         payload = kwargs.get("json") or {}
+        override = self.responses.get(name)
+        if callable(override):  # a test deciding by request payload
+            self.calls.append((name, {"path": path, **payload}))
+            return FakeResponse(override(payload))
         default = REQUEST_DEFAULTS.get(name, {"status": True, "data": None})
         if callable(default):
             default = default(payload)
@@ -560,11 +586,19 @@ def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
 def frozen_clock(freezer: FrozenDateTimeFactory) -> FrozenDateTimeFactory:
     """Pin "today" to the date the fixtures use, so tests pass on any day.
 
-    Midday UTC is 10 November in every timezone the test harness might use
-    (it defaults to US/Pacific, not Israel).
+    20:00 UTC is midday on 10 November in the harness's default timezone
+    (US/Pacific) and 22:00 the same day in Israel: the same date in both, and
+    outside the integration's night pause in both.
     """
-    freezer.move_to("2026-11-10 12:00:00+00:00")
+    freezer.move_to("2026-11-10 20:00:00+00:00")
     return freezer
+
+
+@pytest.fixture(autouse=True)
+def no_poll_jitter() -> Generator[None]:
+    """Polls are shifted by a random fraction of the interval; pin it so ticks are exact."""
+    with patch("custom_components.webtop.coordinator.random.uniform", return_value=1.0):
+        yield
 
 
 @pytest.fixture

@@ -16,11 +16,12 @@ One **account device** and one **device per student**.
 | Entity | Device | State | Attributes |
 | --- | --- | --- | --- |
 | Current lesson | student | the subject being taught right now, `Break` between lessons, `No lesson` outside school hours | teacher, topic, room, hour, start, end, changed, next_subject, next_start, lessons_today, times_known |
+| School day ends | student | when today's last lesson ends (a timestamp, for pickup automations) | starts, lessons |
 | Next test | student | date of the next exam, quiz or assignment set for the student | summary, type, title, subject, start, end, from_hour, to_hour, room, note, days_until |
 | Upcoming tests | student | number of exams from today onward | `tests` list |
 | Latest grade | student | the most recent mark | subject, title, type, date, weight, teacher, remark, `recent` list (the school year) |
 | Schedule changes today | student | substitutions, cancellations, exams and notices on today's board | `changes` (kind, text, hour, teacher, room, note) |
-| Homework today | student | homework written on today's lessons | `items` (date, hour, subject, teacher, homework), `text`, `week` (everything from this week's lessons), `week_count` |
+| Homework today | student | homework written on today's lessons | `items` (date, hour, hours, subject, teacher, homework), `text`, `week`, `week_count`, `last_week` |
 | Behaviour events | student | behaviour records from the last 7 days, commendations included | `today`, `total` (school year), `by_type`, `events` (date, hour, event, subject, teacher, remark, justified) |
 | Lessons today | student | number of lessons today | `today`, `week` (date, hour, subject, teacher, topic, room, start, end) |
 | Class | student (diagnostic) | class, e.g. `ג'2` | school, class code/number, study year |
@@ -28,6 +29,11 @@ One **account device** and one **device per student**.
 | Unread messages | account | the portal's unread-messages badge | `total`, `messages` (subject, sender, sent_at, read/attachment flags, student) |
 | Last message | account | subject of the newest message | sender, sent_at, flags |
 | Unread notifications | account | the portal's unread-notifications badge | `latest` (date, message, module, kind) |
+| Refresh | account (button) | polls the portal now, also during the night pause | |
+
+A double lesson with the same homework written on both hours is one homework
+item listing both hours. `last_week` keeps the previous week's homework in
+view, since what is given on Thursday is usually due on Sunday.
 
 ### Current lesson and history
 
@@ -35,18 +41,24 @@ The **Current lesson** sensor changes state at the exact minute a lesson
 starts or ends, using the timetable and the school's bell schedule. It runs
 on its own timer, so it does not wait for the next poll. Open the entity's
 history (or add a History graph card) to see the day as a strip of subjects.
+Its icon follows the subject: a calculator for maths, a flask for chemistry,
+a cup during a break.
 Lesson times come from the portal when the school publishes them: on its
-tests board, on the labels of its timetable, or on its weekly schedule. Some
-schools publish none. The state is then `unknown` and the `times_known`
-attribute is `false`. In that case open the integration's **Configure**
-dialog and type the school's lesson times once, in lesson order:
+tests board, on the labels of its timetable or of the week's lessons, or on
+its weekly schedule. Some schools publish none. The state is then `unknown`
+and the `times_known` attribute is `false`. In that case open the
+integration's **Configure** dialog and type the lesson times, in lesson order:
 
 ```text
 08:00-08:45, 08:45-09:30, 09:50-10:35, 10:35-11:20, 11:40-12:25, 12:25-13:10
 ```
 
-Prefix a lesson number to start elsewhere (`0=07:15-08:00`). Typed times win
-over the portal's and apply to every student on the account.
+Prefix a lesson number to start elsewhere (`0=07:15-08:00`). The dialog's
+first page takes a default for the account. It only fills in for students
+whose school publishes no times; it never replaces a school's own. With
+several students, a page per student follows, since siblings in different
+schools rarely share a bell schedule. Times typed for a student win over the
+portal's for that student.
 
 ### Events
 
@@ -99,9 +111,15 @@ Settings → Devices & services → **Add integration** → *Webtop (SmartSchool
 | Username / Password | Your Webtop portal credentials. |
 | Login data override (advanced) | Leave empty. The login request carries a `Data` value derived from your username; the integration computes it the same way the Webtop web client does. Fill this in only to force a value captured from the browser. |
 
-Options (⋮ → *Configure*): the polling interval in minutes (default 30,
-minimum 10) and optional lesson times (see *Current lesson and history*).
-Each poll is about ten requests per student; keep it polite.
+Options (⋮ → *Configure*):
+
+- **Polling interval** in minutes (default 30, minimum 10). Each poll is about
+  ten requests per student, and each one is shifted by up to 10% so polls do
+  not land on the clock.
+- **Pause at night** (on by default): the portal is not contacted between
+  23:00 and 06:00, Home Assistant time. The **Refresh** button still works.
+- **Lesson times**, optional, for the account and per student (see *Current
+  lesson and history*).
 
 A parent account that links several logins, one per school, is read school
 by school: the integration switches the session the way the portal's own
@@ -140,6 +158,12 @@ integrations page.
   groups are unknown it falls back to the class list. A school without a
   tests board still shows tests when the pupil card lists evaluations that
   have been set but not yet marked.
+- **Each pupil-card view is requested under its own module id** (timetable,
+  lessons and homework, grades, behaviour), because schools grant them one by
+  one. A capture confirmed it: a school that blocks the timetable refused
+  every view sent under the timetable's id, and answered lessons, homework,
+  grades and behaviour under their own. That school still has no timetable
+  view, so its lessons carry no rooms.
 - **A view the school has blocked is asked for once a day,** not every poll.
 - **If switching to one of several linked schools fails,** that school keeps
   its last known values until the next successful poll.
@@ -214,6 +238,7 @@ Tests fake the pywebtop client, so they run offline against the shapes in
 | Project | Approach | Uses pywebtop? |
 | --- | --- | --- |
 | [Shanksg/smartschool-webtop](https://github.com/Shanksg/smartschool-webtop) | HACS integration with a vendored synchronous `requests` client. Authenticates with a browser-captured `bioLogin` credential (or pasted `webToken`) rather than a password, because of the captcha above. Homework + messages, events, per-student to-do lists. MIT. | No |
+| [dmatik/school](https://github.com/dmatik/school) | Self-hosted family web app with its own database. Syncs homework, lesson topics and behaviour from Webtop. Several ideas here come from it: merging double lessons, keeping earlier weeks of homework, pausing sync at night with jittered timing, a sync button, subject icons, and its use of a separate module id for the lessons view. | No |
 | [t0mer/pywebtop](https://github.com/t0mer/pywebtop) | The async API wrapper this integration is built on (`pip install pywebtop`, import name `webtop`). | — |
 | [t0mer/pymashov](https://github.com/t0mer/pymashov), [NirBY/ha-mashov](https://github.com/NirBY/ha-mashov) | The same idea for Mashov, the other Israeli school portal. | — |
 

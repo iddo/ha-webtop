@@ -108,10 +108,22 @@ async def test_capture_writes_only_anonymized_files(tmp_path: Path, capsys) -> N
     assert requests["menu_counters"]["parsed_by_integration"] == {
         "has_unread_messages": True, "has_unread_notifications": True,
     }  # fmt: skip
-    assert manifest["linked_logins"] == 0 and manifest["schools_captured"] == 1 and manifest["students_captured"] == 2
+    assert (manifest["linked_logins"], manifest["schools_captured"], manifest["students_captured"]) == (0, 1, 2)
     assert requests["pupil_grades__student1"]["http_error"] == 500
     assert requests["pupil_period_grades__student1"]["errorDescription"] == "view is blocked"
     assert requests["homework_today__student1"]["payload_template"]["id"] == "{student_id}"
+    # Each pupil-card view is asked for under its own module id, plus two comparison requests.
+    modules = {
+        name.removesuffix("__student1"): request["payload_template"]["moduleID"]
+        for name, request in requests.items()
+        if name.startswith("pupil_") and name.endswith("__student1")
+    }
+    assert modules == {
+        "pupil_schedule": 10, "pupil_lessons_homework": 11, "pupil_lessons_homework_last_week": 11,
+        "pupil_grades": 6, "pupil_period_grades": 7, "pupil_discipline": 4, "pupil_previous_homework": 11,
+        "pupil_grades_with_timetable_module": 10, "pupil_discipline_with_timetable_module": 10,
+    }  # fmt: skip
+    assert requests["pupil_lessons_homework_last_week__student1"]["payload_template"]["weekIndex"] == -1
     plan = manifest["anonymizer"]["plan"]
     assert plan["login.token"] == "secret"
     # A message's subject is written by a person: redacted by rule, whatever the model would say.

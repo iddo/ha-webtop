@@ -6,6 +6,7 @@ Pure functions: no Home Assistant, no I/O, so the logic is easy to test.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass, field
 
 from .models import BellSchedule, Lesson, parse_date, parse_time
@@ -120,3 +121,47 @@ def resolve(lessons: list[Lesson], bell: BellSchedule, now: dt.datetime) -> Now:
         state = STATE_BREAK if now >= slots[0].start else STATE_NO_LESSON
         return Now(state, None, upcoming, upcoming.start, len(today))
     return Now(STATE_NO_LESSON, None, None, None, len(today))
+
+
+def school_day(
+    lessons: list[Lesson], bell: BellSchedule, day: dt.date, tzinfo: dt.tzinfo | None
+) -> tuple[dt.datetime, dt.datetime] | None:
+    """When the first lesson starts and the last one ends on ``day``; None if that is unknown."""
+    slots = day_slots(lessons, bell, day, tzinfo)
+    if not slots:
+        return None
+    return slots[0].start, max(slot.end for slot in slots)
+
+
+# Subject keyword stems (Hebrew and English) -> Material Design icon. First match wins.
+_SUBJECT_ICONS: tuple[tuple[str, str], ...] = (
+    ("מתמט|חשבון|הנדסה|גאומטר|גיאומטר|אלגבר|math", "mdi:calculator-variant"),
+    ("אנגלית|english|ערבית|צרפתית|ספרדית|רוסית", "mdi:translate"),
+    ("פיזיק|physics", "mdi:atom"),
+    ("כימיה|chemistry", "mdi:flask"),
+    ("ביולוג|biology", "mdi:dna"),
+    ("מדע|טבע|science", "mdi:microscope"),
+    ("מחשב|תכנות|סייבר|רובוט|טכנולוג|computer", "mdi:laptop"),
+    ("תנך|תנ\"ך|תורה|משנה|גמרא|תלמוד|תושב|יהדות|מורשת|מחשבת", "mdi:script-text"),
+    ("היסטור|אזרחות|history|civics", "mdi:bank"),
+    ("גאוגרפ|גיאוגרפ|מולדת|geograph", "mdi:earth"),
+    ("ספרות|לשון|עברית|שפה|הבעה|קריאה|כתיבה|literature", "mdi:book-open-variant"),
+    ("חינוך גופני|חנג|חנ\"ג|ספורט|התעמלות|מחול|sport", "mdi:run"),
+    ("אמנות|אומנות|ציור|פיסול|יצירה|עיצוב|art", "mdi:palette"),
+    ("מוזיק|music|נגינה|מקהלה", "mdi:music"),
+    ("תיאטרון|תאטרון|דרמה|קולנוע|theat", "mdi:drama-masks"),
+    ("חינוך|כישורי חיים|מחנך|שעת חינוך", "mdi:account-group"),
+)
+_COMPILED_SUBJECT_ICONS = tuple((re.compile(pattern), icon) for pattern, icon in _SUBJECT_ICONS)
+ICON_LESSON = "mdi:human-male-board"
+ICON_BREAK = "mdi:coffee"
+ICON_NO_LESSON = "mdi:home-clock"
+
+
+def subject_icon(subject: str | None) -> str:
+    """An icon for a lesson subject, or the generic lesson icon."""
+    text = (subject or "").casefold()
+    for pattern, icon in _COMPILED_SUBJECT_ICONS:
+        if pattern.search(text):
+            return icon
+    return ICON_LESSON

@@ -14,6 +14,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -28,9 +29,12 @@ from .auth import async_create_client, login_failure_reason
 from .const import (
     CONF_DATA,
     CONF_LESSON_TIMES,
+    CONF_NIGHT_PAUSE,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_STUDENT_LESSON_TIMES,
     CONF_USERNAME,
+    DEFAULT_NIGHT_PAUSE,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_SCAN_INTERVAL,
@@ -155,10 +159,20 @@ class WebtopConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class WebtopOptionsFlow(OptionsFlowWithReload):
-    """Options: polling interval and, for schools that publish none, lesson times."""
+    """Options: polling, the night pause, and lesson times for schools that publish none.
+
+    With several students on the account, a second step per student lets each one
+    have their own lesson times, since siblings rarely share a bell schedule.
+    """
+
+    def __init__(self) -> None:
+        self._options: dict[str, Any] = {}
+        self._students: list[tuple[str, str, int]] = []  # key, name, lesson times the portal publishes
+        self._index = 0
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
+        options = self.config_entry.options
         if user_input is not None:
             user_input[CONF_LESSON_TIMES] = (user_input.get(CONF_LESSON_TIMES) or "").strip()
             try:
@@ -166,9 +180,25 @@ class WebtopOptionsFlow(OptionsFlowWithReload):
             except ValueError:
                 errors[CONF_LESSON_TIMES] = "invalid_lesson_times"
             else:
-                return self.async_create_entry(data=user_input)
+                self._options = {
+                    **user_input,
+                    CONF_STUDENT_LESSON_TIMES: dict(options.get(CONF_STUDENT_LESSON_TIMES) or {}),
+                }
+                coordinator = getattr(self.config_entry, "runtime_data", None)
+                students = coordinator.data.students if coordinator is not None and coordinator.data else []
+                self._students = [
+                    (s.key, s.name or s.key, len(coordinator.portal_bell.get(s.key, {}))) for s in students
+                ]
+                # Forget times typed for students who are no longer on the account.
+                known = {key for key, _, _ in self._students}
+                if known:
+                    typed = self._options[CONF_STUDENT_LESSON_TIMES]
+                    self._options[CONF_STUDENT_LESSON_TIMES] = {k: v for k, v in typed.items() if k in known}
+                self._index = 0
+                if len(self._students) > 1:
+                    return await self.async_step_student()
+                return self.async_create_entry(data=self._options)
 
-        options = self.config_entry.options
         schema = vol.Schema(
             {
                 vol.Required(
@@ -183,6 +213,9 @@ class WebtopOptionsFlow(OptionsFlowWithReload):
                         unit_of_measurement="min",
                     )
                 ),
+                vol.Required(
+                    CONF_NIGHT_PAUSE, default=options.get(CONF_NIGHT_PAUSE, DEFAULT_NIGHT_PAUSE)
+                ): BooleanSelector(),
                 vol.Optional(CONF_LESSON_TIMES): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
                 ),
@@ -192,5 +225,41 @@ class WebtopOptionsFlow(OptionsFlowWithReload):
         return self.async_show_form(
             step_id="init",
             data_schema=self.add_suggested_values_to_schema(schema, suggested),
+            errors=errors,
+        )
+
+    async def async_step_student(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Lesson times for one student; shown once per student."""
+        if self._index >= len(self._students):
+            return self.async_create_entry(data=self._options)
+        key, name, portal_hours = self._students[self._index]
+        typed: dict[str, str] = self._options[CONF_STUDENT_LESSON_TIMES]
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            text = (user_input.get(CONF_LESSON_TIMES) or "").strip()
+            try:
+                parse_manual_bell(text)
+            except ValueError:
+                errors[CONF_LESSON_TIMES] = "invalid_lesson_times"
+            else:
+                if text:
+                    typed[key] = text
+                else:
+                    typed.pop(key, None)
+                self._index += 1
+                return await self.async_step_student()
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_LESSON_TIMES): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+                )
+            }
+        )
+        suggested = user_input or {CONF_LESSON_TIMES: typed.get(key, "")}
+        return self.async_show_form(
+            step_id="student",
+            data_schema=self.add_suggested_values_to_schema(schema, suggested),
+            description_placeholders={"student": name, "portal_hours": str(portal_hours)},
             errors=errors,
         )

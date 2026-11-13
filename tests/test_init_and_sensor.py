@@ -23,9 +23,11 @@ from .conftest import (
     DISCIPLINE,
     ENCRYPTED_ID_A,
     ENCRYPTED_ID_B,
+    GRADES_CARD,
     INBOX,
     KEY_A,
     KEY_B,
+    LAST_WEEK,
     LESSONS_WEEK,
     LOGIN_DATA,
     SCHOOL,
@@ -60,8 +62,8 @@ async def test_setup_creates_devices_and_sensors(hass: HomeAssistant, fake_clien
     assert f"{config_entry.entry_id}_{KEY_B}_lessons_today" in unique_ids
     assert f"{config_entry.entry_id}_unread_messages" in unique_ids
     assert not any(ENCRYPTED_ID_A in uid for uid in unique_ids)  # that id changes every school year
-    # 3 account sensors, then per student 9 sensors and a calendar.
-    assert len(entries) == 3 + 2 * (9 + 1)
+    # 3 account sensors and a refresh button, then per student 10 sensors and a calendar.
+    assert len(entries) == 3 + 1 + 2 * (10 + 1)
 
     # Account sensors: the counts are the portal's own menu badges.
     unread = _state(hass, "sensor.webtop_dnh_lvy_unread_messages")
@@ -109,11 +111,18 @@ async def test_setup_creates_devices_and_sensors(hass: HomeAssistant, fake_clien
     assert client.login_count == 1
     assert not [c for c in client.calls if c[0] == "switch_student"]
     week_calls = [c[1] for c in client.calls if c[0] == "GetPupilLessonsAndHomework"]
-    assert [c["studentID"] for c in week_calls] == [ENCRYPTED_ID_A, ENCRYPTED_ID_B]
+    # This week and last week, for each child.
+    assert [(c["studentID"], c["weekIndex"]) for c in week_calls] == [
+        (ENCRYPTED_ID_A, 0), (ENCRYPTED_ID_A, -1), (ENCRYPTED_ID_B, 0), (ENCRYPTED_ID_B, -1),
+    ]  # fmt: skip
     assert week_calls[0] == {
         "path": "/server/api/PupilCard/GetPupilLessonsAndHomework",
-        "weekIndex": 0, "viewType": 0, "studyYear": 2027, "studentID": ENCRYPTED_ID_A, "classCode": 3, "moduleID": 10,
+        "weekIndex": 0, "viewType": 0, "studyYear": 2027, "studentID": ENCRYPTED_ID_A, "classCode": 3, "moduleID": 11,
     }  # fmt: skip
+    # Every pupil-card view is asked for with its own module id.
+    module_of = {name: {c[1]["moduleID"] for c in client.calls if c[0] == name}
+                 for name in ("GetPupilLessonsAndHomework", "GetPupilGrades", "GetPupilDiciplineEvents")}  # fmt: skip
+    assert module_of == {"GetPupilLessonsAndHomework": {11}, "GetPupilGrades": {6}, "GetPupilDiciplineEvents": {4}}
     # With the pupil card available, the dashboard's cut-down widgets are not called at all.
     assert not [c for c in client.calls if c[0] in ("get_homework", "get_discipline_events", "GetGrades")]
     assert len([c for c in client.calls if c[0] == "get_pupil_schedule"]) == 2  # once per child, for rooms
@@ -293,7 +302,11 @@ async def test_school_that_blocks_the_pupil_card(
     client = fake_client.created[0]
     blocked_calls = ("GetPupilLessonsAndHomework", "GetPupilGrades", "GetPupilDiciplineEvents", "get_pupil_schedule")
     before = {name: len([c for c in client.calls if c[0] == name]) for name in blocked_calls}
-    assert set(before.values()) == {2}  # asked once per child
+    # Per child: each view once with its own module id and once with the timetable's; the timetable once.
+    assert before == {
+        "GetPupilLessonsAndHomework": 4, "GetPupilGrades": 4, "GetPupilDiciplineEvents": 4, "get_pupil_schedule": 2,
+    }  # fmt: skip
+    assert [c[1]["moduleID"] for c in client.calls if c[0] == "GetPupilGrades"] == [6, 10, 6, 10]
 
     # Later polls the same day do not ask again...
     freezer.tick(timedelta(minutes=31))
@@ -309,6 +322,79 @@ async def test_school_that_blocks_the_pupil_card(
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert _state(hass, "sensor.nv_m_lvy_lessons_today").state != "unknown"
+
+
+async def test_school_that_blocks_only_the_timetable_still_gives_grades_behaviour_and_homework(
+    hass: HomeAssistant, fake_client, config_entry
+) -> None:
+    """Views are granted one by one. Sending the timetable's id for all of them got all of them blocked."""
+    blocked = {"status": False, "errorDescription": "view is blocked", "data": None}
+
+    def unless_timetable_id(answer):
+        return lambda payload: blocked if payload["moduleID"] == 10 else answer
+
+    fake_client.responses["GetPupilLessonsAndHomework"] = lambda payload: (
+        blocked if payload["moduleID"] == 10 else (LESSONS_WEEK if payload["weekIndex"] == 0 else LAST_WEEK)
+    )
+    fake_client.responses["GetPupilGrades"] = unless_timetable_id(GRADES_CARD)
+    fake_client.responses["GetPupilDiciplineEvents"] = unless_timetable_id(DISCIPLINE)
+    fake_client.responses["get_pupil_schedule"] = blocked
+    await _setup(hass, config_entry)
+
+    assert _state(hass, "sensor.nv_m_lvy_lessons_today").state == "2"
+    assert _state(hass, "sensor.nv_m_lvy_homework_today").state == "1"
+    assert _state(hass, "sensor.nv_m_lvy_behaviour_events").attributes["total"] == 4  # the whole year
+    assert len(_state(hass, "sensor.nv_m_lvy_latest_grade").attributes["recent"]) == 2
+    client = fake_client.created[0]
+    assert {c[1]["moduleID"] for c in client.calls if c[0].startswith("GetPupil")} == {4, 6, 11}
+    assert not [c for c in client.calls if c[0] in ("get_homework", "get_discipline_events", "GetGrades")]
+
+
+async def test_view_blocked_under_its_own_id_is_retried_with_the_timetable_id(
+    hass: HomeAssistant, fake_client, config_entry
+) -> None:
+    blocked = {"status": False, "errorDescription": "view is blocked", "data": None}
+    fake_client.responses["GetPupilGrades"] = lambda payload: GRADES_CARD if payload["moduleID"] == 10 else blocked
+    await _setup(hass, config_entry)
+    assert _state(hass, "sensor.nv_m_lvy_latest_grade").state == "92"
+    grades_calls = [c[1]["moduleID"] for c in fake_client.created[0].calls if c[0] == "GetPupilGrades"]
+    assert grades_calls == [6, 10, 6, 10]
+
+
+async def test_last_weeks_homework_is_listed_and_double_lessons_merge(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory
+) -> None:
+    fake_client.responses["GetPupilLessonsAndHomework"] = lambda payload: (
+        (LESSONS_WEEK if payload["weekIndex"] == 0 else LAST_WEEK)
+        if payload["studentID"] == ENCRYPTED_ID_A
+        else {"status": True, "data": []}
+    )
+    await _setup(hass, config_entry)
+    hw = _state(hass, "sensor.nv_m_lvy_homework_today")
+    assert hw.state == "1" and hw.attributes["week_count"] == 2
+    # Thursday's science homework sat on both lessons of a double period: one item, two hours.
+    assert hw.attributes["last_week"] == [
+        {"date": "2026-11-05", "hour": 3, "hours": [3, 4], "subject": "מדעים", "teacher": "יעל",
+         "homework": "להכין מצגת על מחזור המים", "status": ""}
+    ]  # fmt: skip
+    # Last week's lessons do not count as this week's timetable.
+    assert len(_state(hass, "sensor.nv_m_lvy_lessons_today").attributes["week"]) == 4
+
+    # Last week is re-read every few hours, not on every poll.
+    client = fake_client.created[0]
+
+    def last_week_calls() -> int:
+        return len([c for c in client.calls if c[0] == "GetPupilLessonsAndHomework" and c[1]["weekIndex"] == -1])
+
+    assert last_week_calls() == 2
+    freezer.tick(timedelta(minutes=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert last_week_calls() == 2
+    freezer.tick(timedelta(hours=3))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert last_week_calls() == 4
 
 
 async def test_behaviour_falls_back_to_the_dashboard_widget(hass: HomeAssistant, fake_client, config_entry) -> None:

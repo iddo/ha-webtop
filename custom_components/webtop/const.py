@@ -26,6 +26,25 @@ MIN_SCAN_INTERVAL = 10
 # Lesson times typed by the user, for schools that do not publish them:
 # "08:00-08:45, 08:45-09:30, ..." in lesson order, or "1=08:00-08:45" per lesson.
 CONF_LESSON_TIMES = "lesson_times"
+# The same, per student (keyed by student key). These win over the portal's times; the
+# account-wide value above only fills in for students whose school publishes none.
+CONF_STUDENT_LESSON_TIMES = "student_lesson_times"
+# Do not contact the portal at night; nothing changes there and it halves the load.
+CONF_NIGHT_PAUSE = "night_pause"
+DEFAULT_NIGHT_PAUSE = True
+NIGHT_PAUSE_START_HOUR = 23  # inclusive, Home Assistant local time
+NIGHT_PAUSE_END_HOUR = 6  # exclusive
+# Each poll is shifted by up to this fraction of the interval, so polls do not land on the clock.
+POLL_JITTER = 0.1
+# Last week's lessons change rarely (a teacher filling in late); re-read them this often.
+PREVIOUS_WEEK_REFRESH_HOURS = 3
+
+# Every pupil-card view has its own module id (the number in its URL on the portal), and a
+# school grants or blocks each one separately.
+MODULE_BEHAVIOUR = 4
+MODULE_GRADES = 6
+MODULE_TIMETABLE = 10
+MODULE_WEEK = 11
 MAX_SCAN_INTERVAL = 720
 
 REQUEST_TIMEOUT = 30.0

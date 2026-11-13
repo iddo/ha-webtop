@@ -41,11 +41,23 @@
         "title": "Webtop options",
         "data": {
           "scan_interval": "Polling interval",
+          "night_pause": "Pause at night",
           "lesson_times": "Lesson times"
         },
         "data_description": {
           "scan_interval": "Minutes between polls of the Webtop portal.",
-          "lesson_times": "Only needed when the Current lesson sensor shows unknown because the school publishes no lesson times. List them in lesson order, for example: 08:00-08:45, 08:45-09:30, 09:50-10:35. Prefix a lesson number to skip ahead: 0=07:15-08:00. Leave empty to use the portal's times."
+          "lesson_times": "A default for students whose school publishes no lesson times. List them in lesson order, for example: 08:00-08:45, 08:45-09:30, 09:50-10:35. Prefix a lesson number to skip ahead: 0=07:15-08:00. With several students you are asked about each one next.",
+          "night_pause": "Do not contact the portal between 23:00 and 06:00. The Refresh button still works."
+        }
+      },
+      "student": {
+        "title": "Lesson times for {student}",
+        "description": "The portal publishes {portal_hours} lesson times for {student}. Type this student's own lesson times to use them instead, or leave empty to use the portal's, falling back to the account default.",
+        "data": {
+          "lesson_times": "Lesson times"
+        },
+        "data_description": {
+          "lesson_times": "In lesson order: 08:00-08:45, 08:45-09:30, 09:50-10:35."
         }
       }
     },
@@ -57,6 +69,9 @@
     "sensor": {
       "current_lesson": {
         "name": "Current lesson"
+      },
+      "school_day_end": {
+        "name": "School day ends"
       },
       "next_test": {
         "name": "Next test"
@@ -95,6 +110,11 @@
     "calendar": {
       "school": {
         "name": "School calendar"
+      }
+    },
+    "button": {
+      "refresh": {
+        "name": "Refresh"
       }
     }
   }

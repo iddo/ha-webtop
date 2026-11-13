@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import timedelta
 
 import pytest
@@ -9,11 +10,20 @@ from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import async_capture_events, async_fire_time_changed
 
-from custom_components.webtop.const import CONF_LESSON_TIMES, CONF_SCAN_INTERVAL, EVENT_NEW_GRADE, EVENT_NEW_TEST
+from custom_components.webtop.const import (
+    CONF_LESSON_TIMES,
+    CONF_SCAN_INTERVAL,
+    CONF_STUDENT_LESSON_TIMES,
+    EVENT_NEW_GRADE,
+    EVENT_NEW_TEST,
+)
 from custom_components.webtop.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import (
     GRADES_CARD,
+    KEY_A,
+    KEY_B,
+    LESSONS_WEEK,
     TESTS_BOARD,
     TESTS_BOARD_UNUSED,
     TIMETABLE_WITH_LABELS,
@@ -132,7 +142,7 @@ async def test_current_lesson_unknown_when_the_school_publishes_no_times(
     assert hass.states.get("sensor.nv_m_lvy_lessons_today").state == "2"
 
 
-async def test_typed_lesson_times_fill_the_gap_and_win_over_the_portal(
+async def test_account_lesson_times_fill_in_where_the_school_publishes_none(
     hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
 ) -> None:
     fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
@@ -149,7 +159,53 @@ async def test_typed_lesson_times_fill_the_gap_and_win_over_the_portal(
     assert state.state == "מתמטיקה"
     assert state.attributes["end"] == "2026-11-10T08:20:00+02:00"
     assert state.attributes["next_start"] == "2026-11-10T08:20:00+02:00"
-    # With times typed in, the portal is not asked for them.
+    assert config_entry.runtime_data.portal_bell[KEY_A] == {}  # the portal really had nothing
+
+
+async def test_account_lesson_times_do_not_override_a_school_that_publishes_its_own(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
+) -> None:
+    """Siblings in different schools: a default typed for one must not rewrite the other's day."""
+    freezer.move_to("2026-11-10 08:10:00+02:00")
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(config_entry, options={CONF_LESSON_TIMES: "07:30-08:20, 08:20-09:10"})
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    state = hass.states.get(LESSON)
+    assert state.attributes["end"] == "2026-11-10T08:45:00+02:00"  # the portal's bell, not the typed default
+    assert sorted(config_entry.runtime_data.portal_bell[KEY_A]) == [1, 2, 3, 4, 5]
+
+
+async def test_lesson_times_typed_for_one_student_win_for_that_student_only(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
+) -> None:
+    fake_client.responses["GetPupilLessonsAndHomework"] = LESSONS_WEEK  # both children have lessons
+    freezer.move_to("2026-11-10 08:10:00+02:00")
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        config_entry, options={CONF_STUDENT_LESSON_TIMES: {KEY_B: "08:05-08:55, 08:55-09:45"}}
+    )
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get(LESSON).attributes["end"] == "2026-11-10T08:45:00+02:00"  # A: the portal's
+    sibling = hass.states.get("sensor.myh_lvy_current_lesson")
+    assert sibling.state == "מתמטיקה" and sibling.attributes["end"] == "2026-11-10T08:55:00+02:00"  # B: typed
+
+
+async def test_lesson_times_come_from_the_weeks_own_labels_when_the_timetable_is_blocked(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory, in_israel
+) -> None:
+    week = copy.deepcopy(LESSONS_WEEK)
+    for day in week["data"]:
+        for slot, (start, end) in zip(day["hoursData"], [("8:00", "8:45"), ("8:45", "9:30")], strict=False):
+            slot["hourName"] = f"{slot['hour']}. {end}-{start}"
+    fake_client.responses["GetPupilLessonsAndHomework"] = week
+    fake_client.responses["get_pupil_schedule"] = {"status": False, "errorDescription": "view is blocked"}
+    fake_client.responses["EventsTestsBoard"] = TESTS_BOARD_UNUSED
+    freezer.move_to("2026-11-10 08:50:00+02:00")
+    await _setup(hass, config_entry)
+    state = hass.states.get(LESSON)
+    assert state.state == "אנגלית" and state.attributes["end"] == "2026-11-10T09:30:00+02:00"
     assert not [c for c in fake_client.created[0].calls if c[0] == "WeeklySchedualeForToday"]
 
 
@@ -157,10 +213,13 @@ async def test_bad_lesson_times_option_is_ignored_not_fatal(
     hass: HomeAssistant, fake_client, config_entry, caplog: pytest.LogCaptureFixture, in_israel
 ) -> None:
     config_entry.add_to_hass(hass)
-    hass.config_entries.async_update_entry(config_entry, options={CONF_LESSON_TIMES: "whenever"})
+    hass.config_entries.async_update_entry(
+        config_entry, options={CONF_LESSON_TIMES: "whenever", CONF_STUDENT_LESSON_TIMES: {KEY_A: "9-8"}}
+    )
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
-    assert "Ignoring the lesson times option" in caplog.text
+    assert "Ignoring the lesson times typed for the account" in caplog.text
+    assert "Ignoring the lesson times typed for a student" in caplog.text
     assert hass.states.get(LESSON).attributes["times_known"] is True  # the portal's times are used
 
 

@@ -15,6 +15,7 @@ from custom_components.webtop.models import (
     fill_rooms,
     homework_from_lessons,
     is_no_homework,
+    normalize_name,
     parse_bell_schedule,
     parse_discipline,
     parse_homework,
@@ -40,6 +41,7 @@ from .conftest import (
     INBOX,
     KEY_A,
     KEY_B,
+    LAST_WEEK,
     LESSONS_WEEK,
     LOGIN_DATA,
     MENU_COUNTERS,
@@ -180,12 +182,50 @@ def test_homework_from_the_week_is_dated_and_filtered():
         ("2026-11-10", "מתמטיקה", "עמוד 45 תרגילים 1-5"),
     ]  # "אין" and empty homework are not assignments
     assert items[1].as_dict() == {
-        "date": "2026-11-10", "hour": 1, "subject": "מתמטיקה", "teacher": "רחל",
+        "date": "2026-11-10", "hour": 1, "hours": [1], "subject": "מתמטיקה", "teacher": "רחל",
         "homework": "עמוד 45 תרגילים 1-5", "status": "",
     }  # fmt: skip
     assert items[0].identity() != items[1].identity()
     # An undated timetable cannot say when homework was given.
     assert homework_from_lessons(parse_schedule(TIMETABLE["data"])) == []
+
+
+def test_double_lessons_are_one_assignment():
+    """A teacher writes the same homework on each lesson of a double period."""
+    items = homework_from_lessons(parse_schedule(LAST_WEEK["data"]))
+    assert len(items) == 1
+    assert (items[0].subject, items[0].hour, items[0].hours) == ("מדעים", 3, [3, 4])
+    assert items[0].as_dict()["hours"] == [3, 4]
+
+    def lesson(date: str, hour: int, subject: str, text: str) -> dict:
+        return {"date": date, "hoursData": [{"hour": hour, "scheduale": [{"subject_name": subject, "homeWork": text}]}]}
+
+    mixed = parse_schedule(
+        [
+            lesson("2026-11-10T00:00:00", 2, "אנגלית", "Unit 3  page 20"),
+            lesson("2026-11-10T00:00:00", 1, "אנגלית", "Unit 3 page 20"),  # same text, spacing aside
+            lesson("2026-11-10T00:00:00", 3, "אנגלית", "Learn the words"),  # same day, different homework
+            lesson("2026-11-11T00:00:00", 1, "אנגלית", "Unit 3 page 20"),  # another day: its own item
+            lesson("2026-11-10T00:00:00", 4, "ספרות", "Unit 3 page 20"),  # another subject
+        ]
+    )
+    merged = homework_from_lessons(mixed)
+    assert [(h.date[:10], h.subject, h.hours) for h in merged] == [
+        ("2026-11-10", "אנגלית", [1, 2]),
+        ("2026-11-10", "אנגלית", [3]),
+        ("2026-11-10", "ספרות", [4]),
+        ("2026-11-11", "אנגלית", [1]),
+    ]
+
+
+def test_names_are_compared_without_vowel_points_or_direction_marks():
+    assert normalize_name("נֹעַם  לֵוִי") == normalize_name("נעם לוי")
+    assert normalize_name("\u200fנועם\u200e לוי\ufeff") == normalize_name("נועם לוי")
+    assert normalize_name("  Dana   LEVI ") == "dana levi"
+    assert normalize_name(None) == ""
+    pointed = Student.from_dashboard({"id": "e1", "firstName": "נֹעַם", "lastName": "לֵוִי"}, school_name="S")
+    plain = Student.from_dashboard({"id": "e2", "firstName": "נעם", "lastName": "לוי"}, school_name="S")
+    assert pointed.key == plain.key
 
 
 def test_dashboard_homework_fallback_filters_and_stamps_date():

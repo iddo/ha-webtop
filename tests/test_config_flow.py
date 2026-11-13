@@ -12,14 +12,16 @@ from custom_components.webtop.auth import compute_login_data
 from custom_components.webtop.const import (
     CONF_DATA,
     CONF_LESSON_TIMES,
+    CONF_NIGHT_PAUSE,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_STUDENT_LESSON_TIMES,
     CONF_USERNAME,
     DOMAIN,
     LEGACY_DEFAULT_DATA,
 )
 
-from .conftest import LOGIN_DATA
+from .conftest import DASHBOARD, KEY_A, KEY_B, LOGIN_DATA
 
 USER_INPUT = {CONF_USERNAME: " parent ", CONF_PASSWORD: "secret"}
 
@@ -167,36 +169,89 @@ async def test_reauth_shows_error_on_bad_password(hass: HomeAssistant, fake_clie
     assert result["errors"] == {"base": "invalid_auth"}
 
 
-async def test_options_flow_sets_interval_and_reloads(hass: HomeAssistant, fake_client, config_entry) -> None:
+async def _open_options(hass: HomeAssistant, config_entry) -> str:
     config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
-
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
-    assert result["type"] is FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "init"
+    return result["flow_id"]
+
+
+async def test_options_flow_walks_each_student_and_reloads(hass: HomeAssistant, fake_client, config_entry) -> None:
+    flow_id = await _open_options(hass, config_entry)
 
     # Lesson times that cannot be read keep the form open with an error on that field.
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {CONF_SCAN_INTERVAL: 60, CONF_LESSON_TIMES: "09:00-08:00"}
+        flow_id, {CONF_SCAN_INTERVAL: 60, CONF_NIGHT_PAUSE: True, CONF_LESSON_TIMES: "09:00-08:00"}
     )
-    assert result["type"] is FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "init"
     assert result["errors"] == {CONF_LESSON_TIMES: "invalid_lesson_times"}
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {CONF_SCAN_INTERVAL: 60, CONF_LESSON_TIMES: " 08:00-08:45, 08:45-09:30 "}
+        flow_id, {CONF_SCAN_INTERVAL: 60, CONF_NIGHT_PAUSE: True, CONF_LESSON_TIMES: " 08:00-08:45, 08:45-09:30 "}
     )
+    # Two children on the account: each gets a step of their own, named, with what the portal offers.
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "student"
+    assert result["description_placeholders"] == {"student": "נועם לוי", "portal_hours": "5"}
+
+    result = await hass.config_entries.options.async_configure(flow_id, {CONF_LESSON_TIMES: "nonsense"})
+    assert result["step_id"] == "student" and result["errors"] == {CONF_LESSON_TIMES: "invalid_lesson_times"}
+    assert result["description_placeholders"]["student"] == "נועם לוי"  # still the same child
+
+    result = await hass.config_entries.options.async_configure(flow_id, {})  # use the portal's for the first
+    assert result["step_id"] == "student" and result["description_placeholders"]["student"] == "מאיה לוי"
+    result = await hass.config_entries.options.async_configure(flow_id, {CONF_LESSON_TIMES: "08:10-09:00"})
     await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert config_entry.options == {CONF_SCAN_INTERVAL: 60, CONF_LESSON_TIMES: "08:00-08:45, 08:45-09:30"}
+    assert config_entry.options == {
+        CONF_SCAN_INTERVAL: 60,
+        CONF_NIGHT_PAUSE: True,
+        CONF_LESSON_TIMES: "08:00-08:45, 08:45-09:30",
+        CONF_STUDENT_LESSON_TIMES: {KEY_B: "08:10-09:00"},
+    }
     assert config_entry.runtime_data.update_interval.total_seconds() == 3600
 
 
-async def test_options_flow_lesson_times_are_optional(hass: HomeAssistant, fake_client, config_entry) -> None:
+async def test_options_flow_shows_and_clears_previously_typed_student_times(
+    hass: HomeAssistant, fake_client, config_entry
+) -> None:
     config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        config_entry,
+        options={CONF_STUDENT_LESSON_TIMES: {KEY_A: "08:00-08:40", "a-child-who-left": "07:00-07:45"}},
+    )
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {CONF_SCAN_INTERVAL: 45})
+    flow_id = result["flow_id"]
+    result = await hass.config_entries.options.async_configure(
+        flow_id, {CONF_SCAN_INTERVAL: 30, CONF_NIGHT_PAUSE: True}
+    )
+    schema = result["data_schema"].schema
+    suggested = next(key.description["suggested_value"] for key in schema if key == CONF_LESSON_TIMES)
+    assert suggested == "08:00-08:40"  # what was typed before is offered back
+
+    result = await hass.config_entries.options.async_configure(flow_id, {CONF_LESSON_TIMES: ""})  # clear it
+    result = await hass.config_entries.options.async_configure(flow_id, {})
+    await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert config_entry.options == {CONF_SCAN_INTERVAL: 45, CONF_LESSON_TIMES: ""}
+    # Cleared for the first child, and the entry for a child no longer on the account is dropped.
+    assert config_entry.options[CONF_STUDENT_LESSON_TIMES] == {}
+
+
+async def test_options_flow_with_one_student_has_no_extra_step(hass: HomeAssistant, fake_client, config_entry) -> None:
+    one_child = {**DASHBOARD["data"], "childrens": [DASHBOARD["data"]["childrens"][0]]}
+    fake_client.responses["get_students"] = {"status": True, "data": one_child}
+    flow_id = await _open_options(hass, config_entry)
+    result = await hass.config_entries.options.async_configure(
+        flow_id, {CONF_SCAN_INTERVAL: 45, CONF_NIGHT_PAUSE: False}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert config_entry.options == {
+        CONF_SCAN_INTERVAL: 45,
+        CONF_NIGHT_PAUSE: False,
+        CONF_LESSON_TIMES: "",
+        CONF_STUDENT_LESSON_TIMES: {},
+    }

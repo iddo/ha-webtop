@@ -30,7 +30,17 @@ from .const import MAX_LIST_ATTR_ITEMS
 from .coordinator import WebtopConfigEntry, WebtopCoordinator, WebtopData
 from .entity import WebtopAccountEntity, WebtopStudentEntity
 from .models import HomeworkItem, Lesson, SchoolEvent, Student
-from .timetable import Now, lessons_on, resolve
+from .timetable import (
+    ICON_BREAK,
+    ICON_LESSON,
+    ICON_NO_LESSON,
+    STATE_BREAK,
+    Now,
+    lessons_on,
+    resolve,
+    school_day,
+    subject_icon,
+)
 
 
 def _today() -> str:
@@ -65,13 +75,19 @@ def _homework_value(data: WebtopData, student: Student) -> int | None:
 
 def _homework_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
     today = _homework_today(data, student)
-    week = data.homework.get(student.key, [])
+    everything = data.homework.get(student.key, [])
+    now = dt_util.now().date()
+    sunday = (now - dt.timedelta(days=now.isoweekday() % 7)).isoformat()  # the school week starts on Sunday
+    week = [h for h in everything if h.date[:10] >= sunday]
+    last_week = [h for h in everything if h.date[:10] < sunday]
     return {
         "items": [h.as_dict() for h in today[:MAX_LIST_ATTR_ITEMS]],
         "text": "\n".join(f"{h.subject}: {h.homework}" for h in today) or "No homework",
         # Everything written on this week's lessons, oldest first.
         "week": [h.as_dict() for h in week[: MAX_LIST_ATTR_ITEMS * 2]],
         "week_count": len(week),
+        # Last week's, newest first: what was given on Thursday is usually due on Sunday.
+        "last_week": [h.as_dict() for h in reversed(last_week[-MAX_LIST_ATTR_ITEMS:])],
     }
 
 
@@ -176,7 +192,35 @@ def _changes_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
     return {"changes": [c.as_dict() for c in data.changes.get(student.key, [])[:MAX_LIST_ATTR_ITEMS]]}
 
 
+def _school_day(data: WebtopData, student: Student) -> tuple[dt.datetime, dt.datetime] | None:
+    if not data.schedule_ok.get(student.key):
+        return None
+    now = dt_util.now()
+    return school_day(data.schedule[student.key], data.bell.get(student.key, {}), now.date(), now.tzinfo)
+
+
+def _school_day_end_value(data: WebtopData, student: Student) -> dt.datetime | None:
+    bounds = _school_day(data, student)
+    return bounds[1] if bounds else None
+
+
+def _school_day_end_attrs(data: WebtopData, student: Student) -> dict[str, Any]:
+    bounds = _school_day(data, student)
+    return {
+        "starts": bounds[0].isoformat() if bounds else None,
+        "lessons": len(_lessons_today(data, student)) if data.schedule_ok.get(student.key) else None,
+    }
+
+
 STUDENT_SENSORS: tuple[StudentSensorDescription, ...] = (
+    StudentSensorDescription(
+        key="school_day_end",
+        translation_key="school_day_end",
+        icon="mdi:bus-school",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=_school_day_end_value,
+        attrs_fn=_school_day_end_attrs,
+    ),
     StudentSensorDescription(
         key="next_test",
         translation_key="next_test",
@@ -290,7 +334,6 @@ class WebtopCurrentLessonSensor(WebtopStudentEntity, SensorEntity):
     """
 
     _attr_translation_key = "current_lesson"
-    _attr_icon = "mdi:human-male-board"
 
     def __init__(self, coordinator: WebtopCoordinator, student: Student) -> None:
         super().__init__(coordinator, student)
@@ -307,6 +350,16 @@ class WebtopCurrentLessonSensor(WebtopStudentEntity, SensorEntity):
     def native_value(self) -> str | None:
         now = self._resolve()
         return now.state[:255] if now and now.state else None
+
+    @property
+    def icon(self) -> str:
+        """An icon for the subject being taught, a cup for a break, a house outside school hours."""
+        now = self._resolve()
+        if now is None or now.state is None:
+            return ICON_LESSON
+        if now.current is not None:
+            return subject_icon(now.current.lessons[0].subject)
+        return ICON_BREAK if now.state == STATE_BREAK else ICON_NO_LESSON
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
