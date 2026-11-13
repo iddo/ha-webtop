@@ -62,8 +62,8 @@ async def test_setup_creates_devices_and_sensors(hass: HomeAssistant, fake_clien
     assert f"{config_entry.entry_id}_{KEY_B}_lessons_today" in unique_ids
     assert f"{config_entry.entry_id}_unread_messages" in unique_ids
     assert not any(ENCRYPTED_ID_A in uid for uid in unique_ids)  # that id changes every school year
-    # 3 account sensors and a refresh button, then per student 10 sensors and a calendar.
-    assert len(entries) == 3 + 1 + 2 * (10 + 1)
+    # 3 account sensors and a refresh button, then per student 10 sensors, 2 calendars and a to-do list.
+    assert len(entries) == 3 + 1 + 2 * (10 + 2 + 1)
 
     # Account sensors: the counts are the portal's own menu badges.
     unread = _state(hass, "sensor.webtop_dnh_lvy_unread_messages")

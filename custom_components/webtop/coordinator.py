@@ -154,6 +154,9 @@ class WebtopData:
     groups: dict[str, frozenset[int]] = field(default_factory=dict)
     # Evaluations set but not yet marked, from the pupil card (only when it could be read).
     pending: dict[str, list[SchoolEvent]] = field(default_factory=dict)
+    # The standing weekday timetable, and last week's dated lessons; both feed the timetable calendar.
+    standing: dict[str, list[Lesson]] = field(default_factory=dict)
+    previous_schedule: dict[str, list[Lesson]] = field(default_factory=dict)
     messages: list[Message] = field(default_factory=list)
     # From the portal's menu badges; None when the counters could not be read.
     unread_messages: int | None = None
@@ -170,6 +173,7 @@ class WebtopData:
 PER_STUDENT_FIELDS = (
     "homework", "homework_ok", "discipline", "discipline_ok", "schedule", "schedule_ok",
     "calendar", "calendar_ok", "bell", "grades", "grades_ok", "changes", "changes_ok", "groups", "pending",
+    "standing", "previous_schedule",
 )  # fmt: skip
 
 type WebtopConfigEntry = ConfigEntry[WebtopCoordinator]
@@ -705,6 +709,8 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             f"this week's lessons for {student.name}", "GetPupilLessonsAndHomework", student, year, MODULE_WEEK
         )
         standing = await self._standing_timetable(student, year, now)
+        data.standing[key] = standing or []
+        data.previous_schedule[key] = []
         if isinstance(week, list):
             data.raw_samples["lessons"] = week
             self._week_bell[key] = parse_bell_schedule(week)
@@ -714,6 +720,8 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             data.schedule_ok[key] = True
             # Homework from last week and this one: Thursday's is still due on Sunday.
             earlier = await self._previous_week(student, year, now)
+            fill_rooms(earlier, standing or [])
+            data.previous_schedule[key] = earlier
             data.homework[key] = homework_from_lessons([*earlier, *lessons])
             data.homework_ok[key] = True
         else:

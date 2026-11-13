@@ -26,6 +26,8 @@ One **account device** and one **device per student**.
 | Lessons today | student | number of lessons today | `today`, `week` (date, hour, subject, teacher, topic, room, start, end) |
 | Class | student (diagnostic) | class, e.g. `ג'2` | school, class code/number, study year |
 | School calendar | student (calendar) | exams, school events and vacations for the student | standard calendar events; timed when lesson numbers are known, with the room as location |
+| Timetable | student (calendar) | the lessons themselves: what was taught last week and this week, and the standing timetable for other weeks | events with the subject as title, teacher, topic and homework as description, room as location |
+| Homework | student (to-do list) | number of homework items not yet ticked | items from last week and this week; ticking one is remembered in Home Assistant |
 | Unread messages | account | the portal's unread-messages badge | `total`, `messages` (subject, sender, sent_at, read/attachment flags, student) |
 | Last message | account | subject of the newest message | sender, sent_at, flags |
 | Unread notifications | account | the portal's unread-notifications badge | `latest` (date, message, module, kind) |
@@ -34,6 +36,105 @@ One **account device** and one **device per student**.
 A double lesson with the same homework written on both hours is one homework
 item listing both hours. `last_week` keeps the previous week's homework in
 view, since what is given on Thursday is usually due on Sunday.
+
+### Where lessons, homework and topics appear
+
+Three places, depending on how you like to look at them:
+
+- **Calendar.** Each student's **Timetable** calendar shows lessons in Home
+  Assistant's calendar view. Last week and this week show what was actually
+  taught, with the teacher, the lesson topic and any homework in the event
+  description and the room as its location. Other weeks are drawn from the
+  standing timetable, without known vacations. A lesson appears only when its
+  time is known, so a school that publishes no lesson times needs them typed
+  in first (see below).
+- **To-do list.** Each student's **Homework** list holds last week's and this
+  week's homework in the To-do view. Ticking an item is remembered in Home
+  Assistant; the portal itself has no notion of "done". Items cannot be
+  added, renamed or deleted, because the list mirrors the portal.
+- **Sensor attributes.** The same data, for templates and automations:
+
+| What | Sensor | Attribute |
+| --- | --- | --- |
+| Today's lessons, with topic and room | Lessons today | `today` |
+| The whole week's lessons | Lessons today | `week` |
+| Homework from today's lessons | Homework today | `items`, `text` |
+| This week's homework | Homework today | `week` |
+| Last week's homework | Homework today | `last_week` |
+| The lesson happening now, with its topic | Current lesson | `topic`, `teacher`, `room` |
+
+Each lesson entry carries `date`, `hour`, `subject`, `teacher`, `topic`,
+`room` and `homework`. A topic appears only after the teacher has reported
+the lesson, so future lessons have none. To inspect the attributes, open the
+student's device under Settings → Devices & services → Webtop, or filter by
+the student's name in Developer tools → States.
+
+#### Markdown cards
+
+A Markdown card renders these lists on a dashboard. Replace `CHILD` with the
+prefix of your entity ids, which you can copy from the student's device page.
+
+Today's lessons, with topic and homework:
+
+```yaml
+type: markdown
+title: Lessons today
+content: |
+  {% for l in state_attr('sensor.CHILD_lessons_today', 'today') or [] %}
+  **{{ l.hour }}. {{ l.subject }}** · {{ l.teacher }}{% if l.room %} · {{ l.room }}{% endif %}
+  {% if l.topic %}_{{ l.topic }}_{% endif %}
+  {% if l.homework %}Homework: {{ l.homework }}{% endif %}
+
+  {% endfor %}
+```
+
+This week's homework:
+
+```yaml
+type: markdown
+title: Homework this week
+content: |
+  {% for h in state_attr('sensor.CHILD_homework_today', 'week') or [] %}
+  - **{{ h.date }} · {{ h.subject }}**: {{ h.homework }}
+  {% else %}
+  No homework this week.
+  {% endfor %}
+```
+
+What is on now and what comes next:
+
+```yaml
+type: markdown
+content: |
+  {% set s = 'sensor.CHILD_current_lesson' %}
+  ## {{ states(s) }}
+  {% if state_attr(s, 'teacher') %}{{ state_attr(s, 'teacher') }}{% endif %}
+  {% if state_attr(s, 'room') %} · {{ state_attr(s, 'room') }}{% endif %}
+  {% if state_attr(s, 'topic') %}
+
+  _{{ state_attr(s, 'topic') }}_
+  {% endif %}
+  {% if state_attr(s, 'next_subject') %}
+
+  Next: **{{ state_attr(s, 'next_subject') }}** at {{ as_timestamp(state_attr(s, 'next_start')) | timestamp_custom('%H:%M') }}
+  {% endif %}
+```
+
+Upcoming tests:
+
+```yaml
+type: markdown
+title: Upcoming tests
+content: |
+  {% for t in state_attr('sensor.CHILD_upcoming_tests', 'tests') or [] %}
+  - **{{ t.date }}**{% if t.start %} {{ t.start }}{% endif %} · {{ t.summary }}
+  {% else %}
+  No tests coming up.
+  {% endfor %}
+```
+
+The built-in **Calendar** and **To-do list** cards work with the Timetable
+calendar and the Homework list directly, with no template.
 
 ### Current lesson and history
 

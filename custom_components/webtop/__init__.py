@@ -12,8 +12,9 @@ from homeassistant.core import HomeAssistant
 
 from .coordinator import WebtopConfigEntry, WebtopCoordinator
 from .entity import ensure_account_device
+from .todo import homework_done_store
 
-PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.CALENDAR, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.CALENDAR, Platform.SENSOR, Platform.TODO]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: WebtopConfigEntry) -> bool:
@@ -37,3 +38,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: WebtopConfigEntry) -> b
     if unloaded:
         await entry.runtime_data.async_close()
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: WebtopConfigEntry) -> None:
+    """Delete what the integration stored for this entry when it is removed."""
+    await homework_done_store(hass, entry.entry_id).async_remove()

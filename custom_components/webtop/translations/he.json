@@ -110,11 +110,19 @@
     "calendar": {
       "school": {
         "name": "לוח בית הספר"
+      },
+      "timetable": {
+        "name": "מערכת שעות"
       }
     },
     "button": {
       "refresh": {
         "name": "רענון"
+      }
+    },
+    "todo": {
+      "homework": {
+        "name": "שיעורי בית"
       }
     }
   }

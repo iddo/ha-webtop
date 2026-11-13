@@ -110,11 +110,19 @@
     "calendar": {
       "school": {
         "name": "School calendar"
+      },
+      "timetable": {
+        "name": "Timetable"
       }
     },
     "button": {
       "refresh": {
         "name": "Refresh"
+      }
+    },
+    "todo": {
+      "homework": {
+        "name": "Homework"
       }
     }
   }

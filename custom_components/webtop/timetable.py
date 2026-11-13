@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .models import BellSchedule, Lesson, parse_date, parse_time
@@ -131,6 +132,53 @@ def school_day(
     if not slots:
         return None
     return slots[0].start, max(slot.end for slot in slots)
+
+
+def _week_start(day: dt.date) -> dt.date:
+    """The Sunday that starts the school week containing ``day``."""
+    return day - dt.timedelta(days=day.isoweekday() % 7)
+
+
+MAX_RANGE_DAYS = 120
+
+
+def placed_lessons(
+    dated: list[Lesson],
+    standing: list[Lesson],
+    bell: BellSchedule,
+    start: dt.date,
+    end: dt.date,
+    tzinfo: dt.tzinfo | None,
+    is_day_off: Callable[[dt.date], bool] = lambda _day: False,
+) -> list[tuple[Lesson, dt.datetime, dt.datetime]]:
+    """Every lesson between two dates (inclusive) that can be placed on the clock.
+
+    Weeks the portal gave dated lessons for are shown as taught, with their topics.
+    Other weeks come from the standing weekday timetable, minus known days off.
+    Lessons whose times are unknown are left out.
+    """
+    end = min(end, start + dt.timedelta(days=MAX_RANGE_DAYS))
+    known_weeks = {_week_start(parsed) for lesson in dated if (parsed := parse_date(lesson.date))}
+    undated = [lesson for lesson in standing if not parse_date(lesson.date)]
+    out: list[tuple[Lesson, dt.datetime, dt.datetime]] = []
+    day = start
+    while day <= end:
+        if _week_start(day) in known_weeks:
+            todays = [lesson for lesson in dated if parse_date(lesson.date) == day]
+        elif is_day_off(day):
+            todays = []
+        else:
+            weekday = webtop_weekday(day)
+            todays = [lesson for lesson in undated if lesson.weekday == weekday]
+        for lesson in todays:
+            times = lesson_times(lesson, bell)
+            if times is not None:
+                out.append(
+                    (lesson, dt.datetime.combine(day, times[0], tzinfo), dt.datetime.combine(day, times[1], tzinfo))
+                )
+        day += dt.timedelta(days=1)
+    out.sort(key=lambda item: (item[1], item[2], item[0].subject))
+    return out
 
 
 # Subject keyword stems (Hebrew and English) -> Material Design icon. First match wins.
