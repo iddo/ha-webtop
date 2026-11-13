@@ -402,6 +402,30 @@ CHANGES = {
 }
 
 
+# messageBox/GetMessagesInboxData: the text of one message, as HTML. The shape follows what the
+# Webtop web client reads; it has not been captured, because loading it marks the message as read.
+MESSAGE_HTML = {
+    "enc-message-1": "<p>שלום הורים,</p><p>הטיול השנתי יתקיים ביום ג&#39;.<br>נא לאשר השתתפות &amp; תשלום.</p>",
+    "enc-message-2": "<div>תזכורת: <b>אסיפת הורים</b> ביום חמישי.</div><style>p{color:red}</style>",
+}
+
+
+def _message_body(payload: dict[str, Any]) -> dict[str, Any]:
+    content = MESSAGE_HTML.get(payload.get("MessageId"))
+    if content is None:
+        return {"status": True, "data": None}
+    return {
+        "status": True,
+        "data": {
+            "messageData": {"messageContent": content, "subject": "x", "senderName": "y"},
+            "childrens": [],
+            "roles": None,
+            "signature": None,
+            "survey": None,
+        },
+    }
+
+
 def _week_for(payload: dict[str, Any]) -> dict[str, Any]:
     """Student A's current week; an empty week for anyone else and for other weeks."""
     if payload.get("studentID") == ENCRYPTED_ID_A and payload.get("weekIndex", 0) == 0:
@@ -433,6 +457,7 @@ REQUEST_DEFAULTS: dict[str, Any] = {
     "GetPupilLessonsAndHomework": _week_for,
     "GetPupilDiciplineEvents": DISCIPLINE,
     "GetMenuCounters": MENU_COUNTERS,
+    "GetMessagesInboxData": _message_body,
     "EventsTestsBoard": TESTS_BOARD,
     "WeeklySchedualeForToday": WEEKLY,
     "GetPupilGrades": GRADES_CARD,

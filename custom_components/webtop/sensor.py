@@ -26,7 +26,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.util import dt as dt_util
 
-from .const import MAX_LIST_ATTR_ITEMS
+from .const import MAX_LIST_ATTR_ITEMS, MESSAGE_BODY_ATTR_CHARS
 from .coordinator import WebtopConfigEntry, WebtopCoordinator, WebtopData
 from .entity import WebtopAccountEntity, WebtopStudentEntity
 from .models import HomeworkItem, Lesson, SchoolEvent, Student
@@ -432,7 +432,9 @@ class AccountSensorDescription(SensorEntityDescription):
 def _last_message_attrs(data: WebtopData) -> dict[str, Any]:
     if not data.messages:
         return {}
-    return data.messages[0].as_dict()
+    newest = data.messages[0]
+    # Only this one message carries its text: a list of full texts would outgrow what the recorder keeps.
+    return {**newest.as_dict(), "body": newest.body[:MESSAGE_BODY_ATTR_CHARS]}
 
 
 ACCOUNT_SENSORS: tuple[AccountSensorDescription, ...] = (

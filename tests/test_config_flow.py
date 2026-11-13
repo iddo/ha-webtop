@@ -14,6 +14,7 @@ from custom_components.webtop.const import (
     CONF_LESSON_TIMES,
     CONF_NIGHT_PAUSE,
     CONF_PASSWORD,
+    CONF_READ_UNREAD_MESSAGES,
     CONF_SCAN_INTERVAL,
     CONF_STUDENT_LESSON_TIMES,
     CONF_USERNAME,
@@ -208,6 +209,7 @@ async def test_options_flow_walks_each_student_and_reloads(hass: HomeAssistant, 
     assert config_entry.options == {
         CONF_SCAN_INTERVAL: 60,
         CONF_NIGHT_PAUSE: True,
+        CONF_READ_UNREAD_MESSAGES: False,  # off unless asked for: it marks messages as read on the portal
         CONF_LESSON_TIMES: "08:00-08:45, 08:45-09:30",
         CONF_STUDENT_LESSON_TIMES: {KEY_B: "08:10-09:00"},
     }
@@ -246,12 +248,13 @@ async def test_options_flow_with_one_student_has_no_extra_step(hass: HomeAssista
     fake_client.responses["get_students"] = {"status": True, "data": one_child}
     flow_id = await _open_options(hass, config_entry)
     result = await hass.config_entries.options.async_configure(
-        flow_id, {CONF_SCAN_INTERVAL: 45, CONF_NIGHT_PAUSE: False}
+        flow_id, {CONF_SCAN_INTERVAL: 45, CONF_NIGHT_PAUSE: False, CONF_READ_UNREAD_MESSAGES: True}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert config_entry.options == {
         CONF_SCAN_INTERVAL: 45,
         CONF_NIGHT_PAUSE: False,
+        CONF_READ_UNREAD_MESSAGES: True,
         CONF_LESSON_TIMES: "",
         CONF_STUDENT_LESSON_TIMES: {},
     }

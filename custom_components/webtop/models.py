@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import html
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -419,6 +420,10 @@ class Message:
     has_files: bool = False
     type_id: int | None = None
     student_name: str = ""
+    # The portal's id for the message; needed to ask for its text. It is tied to one school's login.
+    message_id: str = ""
+    # Plain text of the message, once fetched.
+    body: str = ""
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Message:
@@ -432,6 +437,7 @@ class Message:
             has_read=_as_bool(data.get("hasRead", data.get("HasRead"))),
             has_files=_as_bool(data.get("filesWereAttached", data.get("hasFiles"))),
             type_id=_as_int(_pick(data, "typeID", "TypeID", "typeId")),
+            message_id=_pick_text(data, "messageId", "MessageId"),
         )
 
     def identity(self) -> str:
@@ -446,6 +452,36 @@ class Message:
             "has_files": self.has_files,
             "student": self.student_name,
         }
+
+
+_BLOCK_TAG_RE = re.compile(r"<\s*(br|/p|/div|/li|/tr|/h[1-6])\b[^>]*>", re.I)
+_SKIPPED_ELEMENT_RE = re.compile(r"<(script|style)\b.*?</\1\s*>", re.I | re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def html_to_text(html_text: Any) -> str:
+    """A message's HTML as plain text: tags dropped, entities decoded, paragraphs kept as lines."""
+    if not isinstance(html_text, str):
+        return ""
+    text = _SKIPPED_ELEMENT_RE.sub("", html_text)
+    text = _BLOCK_TAG_RE.sub("\n", text)
+    text = html.unescape(_TAG_RE.sub("", text)).replace("\xa0", " ")
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def parse_message_body(data: Any) -> str | None:
+    """The text of one message from ``messageBox/GetMessagesInboxData``; None if it has none.
+
+    The response is ``{messageData: {messageContent: "<html>", ...}, childrens, roles, signature, survey}``.
+    """
+    if not isinstance(data, dict):
+        return None
+    message = data.get("messageData")
+    if not isinstance(message, dict):
+        return None
+    content = _pick(message, "messageContent", "content", "body", "messageBody")
+    return html_to_text(content) if isinstance(content, str) else None
 
 
 def parse_messages(data: Any) -> list[Message]:
@@ -677,9 +713,21 @@ class Notification:
     message: str
     module: str = ""
     kind: str = ""
+    # The encrypted id of the student the notification is about, and that student's name once resolved.
+    student_id: str = ""
+    student_name: str = ""
+
+    def identity(self) -> str:
+        return _digest(self.date[:19], self.message, self.module)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"date": self.date, "message": self.message, "module": self.module, "kind": self.kind}
+        return {
+            "date": self.date,
+            "message": self.message,
+            "module": self.module,
+            "kind": self.kind,
+            "student": self.student_name,
+        }
 
 
 _NOTIFICATION_LISTS = (
@@ -699,6 +747,7 @@ def parse_notifications(data: Any) -> list[Notification]:
             message=_pick_text(row, "message", "text", "title"),
             module=_pick_text(row, "moduleName"),
             kind=kind,
+            student_id=_pick_text(row, "studentID", "studentId"),
         )
         for key, kind in _NOTIFICATION_LISTS
         for row in (data.get(key) or [])

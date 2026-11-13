@@ -29,8 +29,8 @@ One **account device** and one **device per student**.
 | Timetable | student (calendar) | the lessons themselves: what was taught last week and this week, and the standing timetable for other weeks | events with the subject as title, teacher, topic and homework as description, room as location |
 | Homework | student (to-do list) | number of homework items not yet ticked | items from last week and this week; ticking one is remembered in Home Assistant |
 | Unread messages | account | the portal's unread-messages badge | `total`, `messages` (subject, sender, sent_at, read/attachment flags, student) |
-| Last message | account | subject of the newest message | sender, sent_at, flags |
-| Unread notifications | account | the portal's unread-notifications badge | `latest` (date, message, module, kind) |
+| Last message | account | subject of the newest message | sender, sent_at, flags, student, `body` (its text, once it may be fetched) |
+| Unread notifications | account | the portal's unread-notifications badge | `latest` (date, message, module, kind, student) |
 | Refresh | account (button) | polls the portal now, also during the night pause | |
 
 A double lesson with the same homework written on both hours is one homework
@@ -136,6 +136,58 @@ content: |
 The built-in **Calendar** and **To-do list** cards work with the Timetable
 calendar and the Homework list directly, with no template.
 
+### Messages and notifications
+
+These belong to the account, not to a student, so they sit on the account
+device (named "Webtop" and your name). Messages from every linked school are
+merged there.
+
+- **Unread messages** and **Unread notifications** carry the portal's own
+  badges, with the newest messages and notifications as attributes.
+- **Last message** has the newest message's subject as its state and its
+  text in the `body` attribute.
+- `webtop_new_message` and `webtop_new_notification` fire when something
+  appears that was not there on an earlier poll.
+
+**Reading a message's text marks it as read.** On the portal, loading the
+text is what marks a message as read; there is no separate step. So by
+default the integration fetches the text only of messages you have already
+read on the portal. Until then a message shows its subject, sender and date,
+and its event carries an empty `body`.
+
+Switch on **Read unread messages** in Configure to fetch unread messages too.
+Their text then reaches Home Assistant, and a notification automation, at
+once. The cost is the same as opening them yourself: the portal's unread
+badge clears and the school may see them as read.
+
+An inbox card (replace `ACCOUNT` with the prefix of the account sensors):
+
+```yaml
+type: markdown
+title: School messages
+content: |
+  {% for m in state_attr('sensor.ACCOUNT_unread_messages', 'messages') or [] %}
+  - {{ m.sent_at[:10] }} · {{ m.sender }}: {{ m.subject }}{% if m.has_files %} 📎{% endif %}{% if not m.has_read %} (unread){% endif %}
+  {% else %}
+  No messages.
+  {% endfor %}
+```
+
+A phone notification for every new message:
+
+```yaml
+automation:
+  - alias: School message
+    triggers:
+      - trigger: event
+        event_type: webtop_new_message
+    actions:
+      - action: notify.mobile_app_phone
+        data:
+          title: "{{ trigger.event.data.sender }}: {{ trigger.event.data.subject }}"
+          message: "{{ trigger.event.data.body or 'Open the portal to read it.' }}"
+```
+
 ### Current lesson and history
 
 The **Current lesson** sensor changes state at the exact minute a lesson
@@ -173,7 +225,8 @@ a baseline, so nothing is replayed.
 | `webtop_new_behaviour_event` | `student`, `student_key`, `event`, `subject`, `teacher`, `date`, `hour`, `remark`, `justified`, `entry_id` |
 | `webtop_new_grade` | `student`, `student_key`, `subject`, `grade`, `title`, `type`, `date`, `weight`, `teacher`, `remark`, `entry_id` |
 | `webtop_new_test` | `student`, `student_key`, `title`, `subject`, `date`, `start`, `end`, `from_hour`, `to_hour`, `note`, `entry_id` |
-| `webtop_new_message` | `subject`, `sender`, `sent_at`, `has_read`, `has_files`, `student`, `entry_id` |
+| `webtop_new_message` | `subject`, `sender`, `sent_at`, `has_read`, `has_files`, `student`, `body`, `entry_id` |
+| `webtop_new_notification` | `date`, `message`, `module`, `kind`, `student`, `entry_id` |
 
 Example automation:
 
@@ -219,6 +272,8 @@ Options (⋮ → *Configure*):
   not land on the clock.
 - **Pause at night** (on by default): the portal is not contacted between
   23:00 and 06:00, Home Assistant time. The **Refresh** button still works.
+- **Read unread messages** (off by default): see *Messages and
+  notifications* for what it changes on the portal.
 - **Lesson times**, optional, for the account and per student (see *Current
   lesson and history*).
 
@@ -278,7 +333,11 @@ integrations page.
 - Lesson times assume Home Assistant runs in the school's timezone.
 - Event detection lives in memory; a restart re-baselines and will not fire
   events for items that arrived while Home Assistant was down.
-- Only the first page of the inbox is read (the most recent messages).
+- Only the first page of the inbox is read (the most recent messages), and
+  at most five message texts are fetched per school per poll. The shape of a
+  message's text response follows the web client's code; it was not captured,
+  because capturing it would have marked real messages as read.
+- The notification list is the portal's preview: about five per school.
 - Student devices are keyed by the numeric student id the portal reports,
   falling back to a digest of name and school. Webtop's *encrypted* student
   id changes every school year, so it is never used as a key.

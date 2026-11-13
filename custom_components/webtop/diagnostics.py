@@ -59,6 +59,8 @@ TO_REDACT = {
     "componentComment",
     "reExaminationNote",
     "message",
+    "messageContent",
+    "body",
     "extra_data",
     "moduleNavigation",
     "itemId",

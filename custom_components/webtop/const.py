@@ -29,6 +29,16 @@ CONF_LESSON_TIMES = "lesson_times"
 # The same, per student (keyed by student key). These win over the portal's times; the
 # account-wide value above only fills in for students whose school publishes none.
 CONF_STUDENT_LESSON_TIMES = "student_lesson_times"
+# On the portal, loading a message's text is what marks it as read. The text of messages the
+# user has already read is fetched freely; unread ones only when this option is on.
+CONF_READ_UNREAD_MESSAGES = "read_unread_messages"
+DEFAULT_READ_UNREAD_MESSAGES = False
+# Message texts fetched per school per poll, and kept in memory overall.
+MESSAGE_BODIES_PER_POLL = 5
+MESSAGE_BODY_CACHE_SIZE = 200
+MESSAGE_BODY_ATTR_CHARS = 2000
+MESSAGE_BODY_EVENT_CHARS = 4000
+
 # Do not contact the portal at night; nothing changes there and it halves the load.
 CONF_NIGHT_PAUSE = "night_pause"
 DEFAULT_NIGHT_PAUSE = True
@@ -57,6 +67,7 @@ MANUFACTURER = "SmartSchool"
 EVENT_NEW_HOMEWORK = f"{DOMAIN}_new_homework"
 EVENT_NEW_MESSAGE = f"{DOMAIN}_new_message"
 EVENT_NEW_GRADE = f"{DOMAIN}_new_grade"
+EVENT_NEW_NOTIFICATION = f"{DOMAIN}_new_notification"
 EVENT_NEW_BEHAVIOUR = f"{DOMAIN}_new_behaviour_event"
 EVENT_NEW_TEST = f"{DOMAIN}_new_test"
 

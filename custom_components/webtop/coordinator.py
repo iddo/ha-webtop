@@ -30,17 +30,23 @@ from .const import (
     CONF_LESSON_TIMES,
     CONF_NIGHT_PAUSE,
     CONF_PASSWORD,
+    CONF_READ_UNREAD_MESSAGES,
     CONF_SCAN_INTERVAL,
     CONF_STUDENT_LESSON_TIMES,
     CONF_USERNAME,
     DEFAULT_NIGHT_PAUSE,
+    DEFAULT_READ_UNREAD_MESSAGES,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     EVENT_NEW_BEHAVIOUR,
     EVENT_NEW_GRADE,
     EVENT_NEW_HOMEWORK,
     EVENT_NEW_MESSAGE,
+    EVENT_NEW_NOTIFICATION,
     EVENT_NEW_TEST,
+    MESSAGE_BODIES_PER_POLL,
+    MESSAGE_BODY_CACHE_SIZE,
+    MESSAGE_BODY_EVENT_CHARS,
     MODULE_BEHAVIOUR,
     MODULE_GRADES,
     MODULE_TIMETABLE,
@@ -74,6 +80,7 @@ from .models import (
     parse_homework,
     parse_manual_bell,
     parse_menu_counters,
+    parse_message_body,
     parse_messages,
     parse_notifications,
     parse_pending_evaluations,
@@ -221,6 +228,10 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         self._previous_week_cache: dict[str, tuple[dt.datetime, list[Lesson]]] = {}
         self._base_interval = self.update_interval or timedelta(minutes=DEFAULT_SCAN_INTERVAL)
         self._night_pause: bool = entry.options.get(CONF_NIGHT_PAUSE, DEFAULT_NIGHT_PAUSE)
+        self._read_unread: bool = entry.options.get(CONF_READ_UNREAD_MESSAGES, DEFAULT_READ_UNREAD_MESSAGES)
+        # Message identity -> its text. A text never changes, so each is fetched once.
+        self._message_bodies: dict[str, str] = {}
+        self._seen_notifications: set[str] = set()
         self._force_next = False
         self._seen_homework: dict[str, set[str]] = {}
         self._seen_behaviour: dict[str, set[str]] = {}
@@ -427,11 +438,13 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             inbox = unwrap(await client.get_messages_inbox(page_id=1), "GetMessagesInbox")
             data.raw_samples["inbox"] = inbox
             context_name = students[0].name if len(students) == 1 else ""
-            for message in parse_messages(inbox):
+            inbox_messages = parse_messages(inbox)
+            await self._collect_message_bodies(inbox_messages)  # ids only mean something in this school's session
+            for message in inbox_messages:
                 message.student_name = context_name
                 messages.setdefault(message.identity(), message)
 
-            await self._collect_notifications(data)
+            await self._collect_notifications(data, students)
 
         data.messages = sorted(messages.values(), key=lambda m: m.sent_at, reverse=True)
         data.notifications.sort(key=lambda n: n.date, reverse=True)
@@ -471,7 +484,43 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             return False
         return True
 
-    async def _collect_notifications(self, data: WebtopData) -> None:
+    async def _collect_message_bodies(self, messages: list[Message]) -> None:
+        """Attach the text of inbox messages, fetching the ones not seen before.
+
+        On the portal, loading a message's text is what marks it as read: there is no
+        separate "mark read" request when a message is opened. So the text of a message
+        the user has not read yet is fetched only if they turned that option on. A
+        message they already read is fetched freely, newest first, a few per poll.
+        """
+        budget = MESSAGE_BODIES_PER_POLL
+        for message in sorted(messages, key=lambda m: m.sent_at, reverse=True):
+            identity = message.identity()
+            if identity in self._message_bodies:
+                message.body = self._message_bodies[identity]
+                continue
+            if not message.message_id or budget <= 0:
+                continue
+            if not message.has_read and not self._read_unread:
+                continue
+            budget -= 1
+            payload = await self._optional(
+                "message text",
+                lambda message_id=message.message_id: self._post(
+                    "messageBox/GetMessagesInboxData",
+                    {"MessageId": message_id, "FilterId": 0, "IsInbox": True, "hasRead": None},
+                ),
+                envelope="GetMessagesInboxData",
+            )
+            if payload is None:
+                continue  # the request failed; try again on a later poll
+            # An answer without readable text is remembered as empty, so it is not asked for every poll.
+            body = parse_message_body(payload) or ""
+            message.body = body
+            self._message_bodies[identity] = body
+            while len(self._message_bodies) > MESSAGE_BODY_CACHE_SIZE:
+                self._message_bodies.pop(next(iter(self._message_bodies)))
+
+    async def _collect_notifications(self, data: WebtopData, students: list[Student]) -> None:
         """Unread badges and the notification preview for the current session."""
         counters = await self._optional(
             "menu counters", lambda: self._post("Menu/GetMenuCounters", {}), envelope="GetMenuCounters"
@@ -491,7 +540,10 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         )
         if preview is not None:
             data.raw_samples["notifications"] = preview
-            data.notifications.extend(parse_notifications(preview))
+            names = {student.student_id: student.name for student in students}
+            for notification in parse_notifications(preview):
+                notification.student_name = names.get(notification.student_id, "")
+                data.notifications.append(notification)
             if counted is None:
                 counted = parse_unread_count(preview)
         if counted is not None:
@@ -843,7 +895,18 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             if self._baseline_done:
                 self.hass.bus.async_fire(
                     EVENT_NEW_MESSAGE,
-                    {"entry_id": self.config_entry.entry_id, **message.as_dict()},
+                    {
+                        "entry_id": self.config_entry.entry_id,
+                        **message.as_dict(),
+                        # Empty for a message not read yet, unless reading unread messages is switched on.
+                        "body": message.body[:MESSAGE_BODY_EVENT_CHARS],
+                    },
+                )
+        for notification in data.notifications:
+            if self._first_sighting(self._seen_notifications, notification.identity()):
+                self.hass.bus.async_fire(
+                    EVENT_NEW_NOTIFICATION,
+                    {"entry_id": self.config_entry.entry_id, **notification.as_dict()},
                 )
         self._baseline_done = True
 

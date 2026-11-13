@@ -31,10 +31,12 @@ from .const import (
     CONF_LESSON_TIMES,
     CONF_NIGHT_PAUSE,
     CONF_PASSWORD,
+    CONF_READ_UNREAD_MESSAGES,
     CONF_SCAN_INTERVAL,
     CONF_STUDENT_LESSON_TIMES,
     CONF_USERNAME,
     DEFAULT_NIGHT_PAUSE,
+    DEFAULT_READ_UNREAD_MESSAGES,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_SCAN_INTERVAL,
@@ -215,6 +217,10 @@ class WebtopOptionsFlow(OptionsFlowWithReload):
                 ),
                 vol.Required(
                     CONF_NIGHT_PAUSE, default=options.get(CONF_NIGHT_PAUSE, DEFAULT_NIGHT_PAUSE)
+                ): BooleanSelector(),
+                vol.Required(
+                    CONF_READ_UNREAD_MESSAGES,
+                    default=options.get(CONF_READ_UNREAD_MESSAGES, DEFAULT_READ_UNREAD_MESSAGES),
                 ): BooleanSelector(),
                 vol.Optional(CONF_LESSON_TIMES): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)

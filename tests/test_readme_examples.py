@@ -24,9 +24,14 @@ def markdown_cards() -> dict[str, str]:
     return cards
 
 
+def _with_real_ids(content: str, child: str) -> str:
+    """Fill in the README's placeholders with the test fixture's entity id prefixes."""
+    return content.replace("sensor.CHILD_", f"sensor.{child}_").replace("sensor.ACCOUNT_", "sensor.webtop_dnh_lvy_")
+
+
 def test_readme_has_the_documented_cards() -> None:
-    assert set(markdown_cards()) >= {"Lessons today", "Homework this week", "Upcoming tests"}
-    assert len(markdown_cards()) == 4
+    assert set(markdown_cards()) >= {"Lessons today", "Homework this week", "Upcoming tests", "School messages"}
+    assert len(markdown_cards()) == 5
 
 
 @pytest.fixture
@@ -40,8 +45,7 @@ async def rendered(
     await hass.async_block_till_done()
     out = {}
     for title, content in markdown_cards().items():
-        template = Template(content.replace("sensor.CHILD_", "sensor.nv_m_lvy_"), hass)
-        out[title] = template.async_render()
+        out[title] = Template(_with_real_ids(content, "nv_m_lvy"), hass).async_render()
     return out
 
 
@@ -72,6 +76,13 @@ async def test_tests_card(rendered: dict[str, str]) -> None:
     assert "- **2026-11-18** 08:45 · מבחן: היסטוריה - פרקים 4-6" in text
 
 
+async def test_messages_card(rendered: dict[str, str]) -> None:
+    text = rendered["School messages"]
+    assert "- 2026-11-09 · כהן דוד: טיול שנתי 📎 (unread)" in text
+    assert "- 2026-11-01 · מזרחי שרה: הודעה ישנה" in text
+    assert "No messages." not in text
+
+
 async def test_cards_render_for_a_student_with_nothing(
     hass: HomeAssistant, fake_client, config_entry
 ) -> None:
@@ -80,7 +91,7 @@ async def test_cards_render_for_a_student_with_nothing(
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
     for title, content in markdown_cards().items():
-        text = Template(content.replace("sensor.CHILD_", "sensor.myh_lvy_"), hass).async_render()
+        text = Template(_with_real_ids(content, "myh_lvy"), hass).async_render()
         assert isinstance(text, str), title
-    homework = Template(markdown_cards()["Homework this week"].replace("CHILD", "myh_lvy"), hass).async_render()
+    homework = Template(_with_real_ids(markdown_cards()["Homework this week"], "myh_lvy"), hass).async_render()
     assert "No homework this week." in homework
