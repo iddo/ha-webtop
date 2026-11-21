@@ -18,14 +18,15 @@ from typing import Any, TypeVar
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from webtop import WebtopClient, WebtopError, WebtopLoginError, WebtopRequestError
 
-from .auth import async_create_client, login_failure_reason
+from .auth import async_create_client, configured_user_agent, is_firewall_block, login_failure_reason
 from .const import (
+    BLOCKED_BACKOFF_SECONDS,
     CONF_DATA,
     CONF_LESSON_TIMES,
     CONF_NIGHT_PAUSE,
@@ -53,9 +54,12 @@ from .const import (
     MODULE_WEEK,
     NIGHT_PAUSE_END_HOUR,
     NIGHT_PAUSE_START_HOUR,
+    NOTIFICATION_VIEWS,
     POLL_JITTER,
     PREVIOUS_WEEK_REFRESH_HOURS,
+    STUDENT_VIEWS,
     TESTS_BOARD_MONTHS_AHEAD,
+    VIEW_TTL_HOURS,
 )
 from .models import (
     BellSchedule,
@@ -105,6 +109,8 @@ _HTTP_STATUS_RE = re.compile(r"\((\d{3})\)")
 
 def is_auth_error(err: Exception) -> bool:
     """True when the server rejected our session rather than the request."""
+    if is_firewall_block(err):
+        return False  # refused in front of the portal; logging in again would be refused too
     if isinstance(err, WebtopLoginError):
         return True
     if isinstance(err, WebtopApiError):
@@ -233,6 +239,13 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         self._message_bodies: dict[str, str] = {}
         self._seen_notifications: set[str] = set()
         self._force_next = False
+        self._blocked_in_a_row = 0
+        # (owner, view) -> (when read, payload). The owner is a student key, a linked login or "account".
+        self._views: dict[tuple[str, str], tuple[dt.datetime, Any]] = {}
+        self._read_everything = False
+        # Notifications already acted on, and the unread-messages badge last seen per login.
+        self._announced: set[str] = set()
+        self._last_unread: dict[str, int | None] = {}
         self._seen_homework: dict[str, set[str]] = {}
         self._seen_behaviour: dict[str, set[str]] = {}
         self._seen_grades: dict[str, set[str]] = {}
@@ -275,6 +288,7 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             entry.data[CONF_USERNAME],
             entry.data[CONF_PASSWORD],
             entry.data.get(CONF_DATA),
+            configured_user_agent(entry.data, entry.options),
         )
         try:
             await client.login()
@@ -305,24 +319,46 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             # Nothing changes on the portal at night. Entities still re-evaluate
             # (the date rolls over at midnight), but the portal is left alone.
             return self.data
+        self._read_everything = forced
         try:
             data = await self._fetch_with_relogin()
-        except WebtopLoginError as err:
-            reason = login_failure_reason(err)
-            if reason == "cannot_connect":
-                raise UpdateFailed(f"Webtop login did not complete: {err}") from err
-            if reason == "captcha_required":
-                raise ConfigEntryAuthFailed(
-                    "Webtop demands a captcha for this login; sign in once in a browser, then re-authenticate"
-                ) from err
-            if reason == "too_many_attempts":
-                raise ConfigEntryAuthFailed("Webtop locked the account after too many attempts") from err
-            raise ConfigEntryAuthFailed("Webtop rejected the credentials") from err
         except (WebtopError, WebtopApiError) as err:
-            raise UpdateFailed(f"Webtop request failed: {err}") from err
+            if is_firewall_block(err):
+                raise self._firewall_blocked() from err
+            raise self._translate(err) from err
+        self._blocked_in_a_row = 0
 
         self._publish_events(data)
         return data
+
+    def _firewall_blocked(self) -> Exception:
+        """The portal's firewall refused us. Say so, and leave it alone for a while."""
+        message = (
+            "The Webtop portal's firewall refused the connection (HTTP 403) before the portal saw the "
+            "request. This is not a password problem: the portal is blocking this client or this network."
+        )
+        if self.data is None:
+            # During setup: fail plainly rather than have Home Assistant retry every minute.
+            return ConfigEntryError(f"{message} Reload the integration to try again.")
+        step = min(self._blocked_in_a_row, len(BLOCKED_BACKOFF_SECONDS) - 1)
+        self._blocked_in_a_row += 1
+        wait = BLOCKED_BACKOFF_SECONDS[step]
+        return UpdateFailed(f"{message} Trying again in {wait // 3600} h.", retry_after=wait)
+
+    def _translate(self, err: Exception) -> Exception:
+        """Turn a portal error into what Home Assistant should do about it."""
+        if isinstance(err, WebtopLoginError):
+            reason = login_failure_reason(err)
+            if reason == "cannot_connect":
+                return UpdateFailed(f"Webtop login did not complete: {err}")
+            if reason == "captcha_required":
+                return ConfigEntryAuthFailed(
+                    "Webtop demands a captcha for this login; sign in once in a browser, then re-authenticate"
+                )
+            if reason == "too_many_attempts":
+                return ConfigEntryAuthFailed("Webtop locked the account after too many attempts")
+            return ConfigEntryAuthFailed("Webtop rejected the credentials")
+        return UpdateFailed(f"Webtop request failed: {err}")
 
     async def _fetch_with_relogin(self) -> WebtopData:
         """Fetch everything; on a rejected session log in once more and retry."""
@@ -362,8 +398,8 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             result = await call()
             return unwrap(result, envelope) if envelope else result
         except (WebtopRequestError, WebtopApiError) as err:
-            if is_auth_error(err):
-                raise
+            if is_auth_error(err) or is_firewall_block(err):
+                raise  # not about this one view: the session is gone, or the firewall is refusing us
             if isinstance(err, WebtopApiError) and err.is_blocked_view:
                 if remember is not None:
                     self._blocked[remember] = today
@@ -371,6 +407,45 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                 return None
             _LOGGER.warning("Webtop %s failed; keeping the other data: %s", what, err)
             return None
+
+    async def _cached(self, owner: str, view: str, fetch: Callable[[], Awaitable[Any]], now: dt.datetime) -> Any:
+        """A view's payload: the copy in hand while it is fresh, otherwise read again.
+
+        When a read fails, the previous copy keeps being shown rather than nothing.
+        """
+        key = (owner, view)
+        held = self._views.get(key)
+        ttl = timedelta(hours=VIEW_TTL_HOURS[view.split(":", 1)[0]])
+        if held is not None and not self._read_everything and now - held[0] < ttl:
+            return held[1]
+        payload = await fetch()
+        if payload is None:
+            return held[1] if held is not None else None
+        self._views[key] = (now, payload)
+        return payload
+
+    def _mark_stale(self, owner: str, *views: str) -> None:
+        """Have these views read again on this poll."""
+        for view in views:
+            self._views.pop((owner, view), None)
+
+    def _heed_notifications(self, notifications: list[Notification], students: list[Student]) -> None:
+        """Re-read what the portal's notifications say has changed.
+
+        The portal tells its users about new homework, behaviour records and grades through
+        this list. Reading it every poll is two small requests; it replaces re-reading every
+        view every time.
+        """
+        by_id = {student.student_id: student.key for student in students}
+        for notification in notifications:
+            identity = notification.identity()
+            if identity in self._announced:
+                continue
+            self._announced.add(identity)
+            views = NOTIFICATION_VIEWS.get(notification.module.casefold(), STUDENT_VIEWS)
+            owners = [by_id[notification.student_id]] if notification.student_id in by_id else list(by_id.values())
+            for owner in owners:
+                self._mark_stale(owner, *views)
 
     async def _collect(self) -> WebtopData:
         client = self.client
@@ -387,7 +462,12 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
 
         # A parent with children in different schools has one login per school,
         # linked together; the session has to be switched to each in turn.
-        linked = await self._optional("linked students", client.get_linked_students) or []
+        linked = (
+            await self._cached(
+                "account", "linked", lambda: self._optional("linked students", client.get_linked_students), now
+            )
+            or []
+        )
         contexts: list[dict[str, Any] | None] = (
             [ctx for ctx in linked if isinstance(ctx, dict)] if len(linked) > 1 else [None]
         )
@@ -405,7 +485,10 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             school_name = session.school_name or (context or {}).get("school_name") or ""
             institution = login_data.get("institutionCode") or login_data.get("InstitutionCode")
 
-            dashboard = unwrap(await client.get_students(), "InitDashboard")
+            async def read_dashboard() -> Any:
+                return unwrap(await client.get_students(), "InitDashboard")
+
+            dashboard = await self._cached(context_id, "dashboard", read_dashboard, now)
             data.raw_samples["dashboard"] = dashboard
             students = parse_students(dashboard, school_name=school_name)
             if not students:
@@ -417,6 +500,8 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
 
             fresh = [s for s in students if not any(known.key == s.key for known in data.students)]
             self._context_students[context_id] = [s.key for s in fresh]
+            # First the portal's own account of what changed; it decides what else is read.
+            await self._collect_notifications(data, students, context_id)
             board_events, board_bell = await self._collect_tests_board(data, institution, now)
             for student in fresh:  # a child reachable through two contexts is only read once
                 data.students.append(student)
@@ -435,7 +520,10 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
                     data.calendar_ok[student.key] = False
                 data.bell[student.key] = await self._bell_for(student, board_bell, institution, now)
 
-            inbox = unwrap(await client.get_messages_inbox(page_id=1), "GetMessagesInbox")
+            async def read_inbox() -> Any:
+                return unwrap(await client.get_messages_inbox(page_id=1), "GetMessagesInbox")
+
+            inbox = await self._cached(context_id, "inbox", read_inbox, now)
             data.raw_samples["inbox"] = inbox
             context_name = students[0].name if len(students) == 1 else ""
             inbox_messages = parse_messages(inbox)
@@ -443,8 +531,6 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             for message in inbox_messages:
                 message.student_name = context_name
                 messages.setdefault(message.identity(), message)
-
-            await self._collect_notifications(data, students)
 
         data.messages = sorted(messages.values(), key=lambda m: m.sent_at, reverse=True)
         data.notifications.sort(key=lambda n: n.date, reverse=True)
@@ -520,8 +606,12 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             while len(self._message_bodies) > MESSAGE_BODY_CACHE_SIZE:
                 self._message_bodies.pop(next(iter(self._message_bodies)))
 
-    async def _collect_notifications(self, data: WebtopData, students: list[Student]) -> None:
-        """Unread badges and the notification preview for the current session."""
+    async def _collect_notifications(self, data: WebtopData, students: list[Student], context_id: str) -> None:
+        """Unread badges and the notification preview for the current session.
+
+        Read on every poll, before anything else: a changed badge or a new notification
+        marks the matching views to be read again.
+        """
         counters = await self._optional(
             "menu counters", lambda: self._post("Menu/GetMenuCounters", {}), envelope="GetMenuCounters"
         )
@@ -532,6 +622,9 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
             counted = parsed.unread_notifications
             if parsed.unread_messages is not None:
                 data.unread_messages = (data.unread_messages or 0) + parsed.unread_messages
+            if context_id in self._last_unread and self._last_unread[context_id] != parsed.unread_messages:
+                self._mark_stale(context_id, "inbox")  # a message arrived, or one was read on the portal
+            self._last_unread[context_id] = parsed.unread_messages
 
         preview = await self._optional(
             "notification preview",
@@ -541,9 +634,11 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         if preview is not None:
             data.raw_samples["notifications"] = preview
             names = {student.student_id: student.name for student in students}
-            for notification in parse_notifications(preview):
+            notifications = parse_notifications(preview)
+            for notification in notifications:
                 notification.student_name = names.get(notification.student_id, "")
                 data.notifications.append(notification)
+            self._heed_notifications(notifications, students)
             if counted is None:
                 counted = parse_unread_count(preview)
         if counted is not None:
@@ -574,19 +669,24 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         answered = False
         month = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
         for _ in range(TESTS_BOARD_MONTHS_AHEAD + 1):
-            payload = await self._optional(
-                "tests board",
-                lambda when=month: self._post(
-                    "shotef/EventsTestsBoard",
-                    {
-                        "institutionCode": institution,
-                        "selectedDate": when.isoformat(),
-                        "selectedView": 3,
-                        "loadFilters": True,
-                        "studyYear": school_year_for(when),
-                    },
+            payload = await self._cached(
+                str(institution),
+                f"board:{month:%Y-%m}",
+                lambda when=month: self._optional(
+                    "tests board",
+                    lambda: self._post(
+                        "shotef/EventsTestsBoard",
+                        {
+                            "institutionCode": institution,
+                            "selectedDate": when.isoformat(),
+                            "selectedView": 3,
+                            "loadFilters": True,
+                            "studyYear": school_year_for(when),
+                        },
+                    ),
+                    envelope="EventsTestsBoard",
                 ),
-                envelope="EventsTestsBoard",
+                now,
             )
             if payload is not None:
                 data.raw_samples["tests_board"] = payload
@@ -757,8 +857,13 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         year = student.study_year or school_year_for(now)
 
         # This week's lessons, dated, with the homework and topic written on each one.
-        week = await self._pupil_card(
-            f"this week's lessons for {student.name}", "GetPupilLessonsAndHomework", student, year, MODULE_WEEK
+        week = await self._cached(
+            key,
+            "week",
+            lambda: self._pupil_card(
+                f"this week's lessons for {student.name}", "GetPupilLessonsAndHomework", student, year, MODULE_WEEK
+            ),
+            now,
         )
         standing = await self._standing_timetable(student, year, now)
         data.standing[key] = standing or []
@@ -798,38 +903,50 @@ class WebtopCoordinator(DataUpdateCoordinator[WebtopData]):
         data.groups[key] = student_groups(data.schedule[key]) | student_groups(standing or [])
 
         if dashboard_allows(dashboard, "allowGetPupilDiciplineEvents"):
-            # The pupil card lists the whole year; the dashboard widget only the latest few.
-            payload = await self._pupil_card(
-                f"behaviour events for {student.name}", "GetPupilDiciplineEvents", student, year, MODULE_BEHAVIOUR
-            )
-            if payload is None:
-                payload = await self._optional(
+
+            async def read_behaviour() -> Any:
+                # The pupil card lists the whole year; the dashboard widget only the latest few.
+                card = await self._pupil_card(
+                    f"behaviour events for {student.name}", "GetPupilDiciplineEvents", student, year, MODULE_BEHAVIOUR
+                )
+                if card is not None:
+                    return card
+                return await self._optional(
                     f"recent behaviour events for {student.name}",
                     lambda: client.get_discipline_events(
                         encrypted_student_id=student.student_id, class_code=student.class_code
                     ),
                     envelope="GetPupilDiciplineEvents",
                 )
+
+            payload = await self._cached(key, "behaviour", read_behaviour, now)
             if payload is not None and view_allowed(payload):
                 data.raw_samples["discipline"] = payload
                 data.discipline[key] = parse_discipline(payload)
                 data.discipline_ok[key] = True
 
         if dashboard_allows(dashboard, "allowGetGrades"):
-            # Same split: every mark of the year on the pupil card, the latest few on the dashboard.
-            payload = await self._pupil_card(
-                f"grades for {student.name}", "GetPupilGrades", student, year, MODULE_GRADES
-            )
-            if payload is not None:
-                data.pending[key] = parse_pending_evaluations(payload)
-            else:
-                payload = await self._optional(
+
+            async def read_grades() -> Any:
+                # Same split: every mark of the year on the pupil card, the latest few on the dashboard.
+                card = await self._pupil_card(
+                    f"grades for {student.name}", "GetPupilGrades", student, year, MODULE_GRADES
+                )
+                if card is not None:
+                    return {"from_card": True, "payload": card}
+                widget = await self._optional(
                     f"recent grades for {student.name}",
                     lambda: self._post(
                         "dashboard/GetGrades", {"id": student.student_id, "ClassCode": student.class_code}
                     ),
                     envelope="GetGrades",
                 )
+                return None if widget is None else {"from_card": False, "payload": widget}
+
+            read = await self._cached(key, "grades", read_grades, now)
+            payload = read["payload"] if read else None
+            if read and read["from_card"]:
+                data.pending[key] = parse_pending_evaluations(payload)
             if payload is not None and view_allowed(payload):
                 data.raw_samples["grades"] = payload
                 data.grades[key] = parse_grades(payload)

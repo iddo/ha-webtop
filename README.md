@@ -267,13 +267,17 @@ Settings → Devices & services → **Add integration** → *Webtop (SmartSchool
 
 Options (⋮ → *Configure*):
 
-- **Polling interval** in minutes (default 30, minimum 10). Each poll is about
-  ten requests per student, and each one is shifted by up to 10% so polls do
-  not land on the clock.
+- **Polling interval** in minutes (default 60, minimum 10). Each poll is
+  shifted by up to 10% so polls do not land on the clock. See *How lightly it
+  polls* for what a poll costs.
 - **Pause at night** (on by default): the portal is not contacted between
   23:00 and 06:00, Home Assistant time. The **Refresh** button still works.
 - **Read unread messages** (off by default): see *Messages and
   notifications* for what it changes on the portal.
+- **Client identification** (advanced): the User-Agent the integration sends.
+  Left empty, it says what it is: `ha-webtop/<version> (Home Assistant
+  integration; +https://github.com/iddo/ha-webtop)`. The same field is on the
+  setup form.
 - **Lesson times**, optional, for the account and per student (see *Current
   lesson and history*).
 
@@ -284,6 +288,62 @@ school picker does.
 If Webtop rejects the credentials later (for example after a password
 change), the integration asks you to **re-authenticate** from the
 integrations page.
+
+## How lightly it polls
+
+The integration tries to ask the portal for as little as it can.
+
+- **A normal poll reads only what says "something changed":** the unread
+  badges, the portal's notification list, and today's schedule changes. For a
+  parent with one child in each of three schools that is 12 requests, against
+  about 40 for reading everything.
+- **A notification decides what is read next.** The portal announces new
+  homework, behaviour records and grades in that list. When one appears, the
+  matching view for that child is read on the same poll. A changed
+  unread-messages badge does the same for the inbox.
+- **Otherwise each view is re-read on its own schedule:** this week's lessons
+  and the inbox every 2 hours, behaviour every 3, grades and the tests board
+  every 6, the list of children twice a day, the standing timetable and
+  lesson times once a day.
+- **Nothing is read at night** (23:00 to 06:00) unless you switch that off.
+- **The Refresh button reads everything at once**, for when you do not want
+  to wait.
+
+So a new grade can take up to a poll interval to appear if the portal
+announces it, and up to six hours if it does not. Press Refresh to see it
+now.
+
+The portal's website offers no push channel that a client like this one can
+subscribe to, as far as could be determined; its phone app receives pushes
+through Apple's and Google's services, which are tied to that app.
+
+## When the portal refuses the connection
+
+The portal sits behind a content network with a web firewall. If that
+firewall refuses a request, it answers `HTTP 403` with a block page before
+the portal itself sees anything. The integration then reports **"The portal's
+firewall refused the connection"**. That is not a password problem, and
+retyping the password will not help.
+
+What the integration does about it:
+
+- **During setup** it fails with that message and does not retry on its own.
+  Reload the integration to try again.
+- **While running** it stops polling for an hour, then three, then six at a
+  time, and resumes by itself when requests get through again. The
+  **Refresh** button tries at once.
+- **It does not ask for your password** and does not log in again, since the
+  block is in front of the login.
+
+Such a block can follow from the request volume of one network, or from the
+portal choosing to refuse clients that are not browsers. In November 2026
+the portal began refusing this integration's requests while a browser on the
+same computer still worked. The integration identifies itself honestly and
+does not pose as a browser. If the portal's operator does not want
+programmatic access, the integration will not work there, and asking them is
+the way to change that. The **Client identification** setting exists so you
+can see how the portal responds to a different identification; what you put
+there is your decision.
 
 ## Known limitations
 

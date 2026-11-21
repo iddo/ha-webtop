@@ -13,10 +13,12 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_DATA, CONF_PASSWORD, CONF_USERNAME
+from .auth import configured_user_agent
+from .const import CONF_DATA, CONF_PASSWORD, CONF_USER_AGENT, CONF_USERNAME, DEFAULT_USER_AGENT
 from .coordinator import WebtopConfigEntry
 
 TO_REDACT = {
+    CONF_USER_AGENT,
     CONF_USERNAME,
     CONF_PASSWORD,
     CONF_DATA,
@@ -94,7 +96,7 @@ async def async_get_config_entry_diagnostics(
     return {
         "entry": {
             "data": async_redact_data(dict(entry.data), TO_REDACT),
-            "options": dict(entry.options),
+            "options": async_redact_data(dict(entry.options), TO_REDACT),
             "unique_id": "**REDACTED**" if entry.unique_id else None,
         },
         # The school's name would identify the family; say only whether one is known.
@@ -131,6 +133,9 @@ async def async_get_config_entry_diagnostics(
             }
             for s in data.students
         ],
+        "client_identification": (
+            "default" if configured_user_agent(entry.data, entry.options) == DEFAULT_USER_AGENT else "custom"
+        ),
         "messages": len(data.messages),
         "unread_messages": data.unread_messages,
         "unread_notifications": data.unread_notifications,

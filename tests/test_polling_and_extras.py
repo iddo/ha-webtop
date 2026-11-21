@@ -49,8 +49,8 @@ async def _advance(hass: HomeAssistant, freezer: FrozenDateTimeFactory, **delta)
 
 
 def _polls(fake_client) -> int:
-    """How many times the portal's dashboard was read: once per real poll."""
-    return len([c for c in fake_client.created[0].calls if c[0] == "get_students"])
+    """How many times the portal's unread badges were read: once per real poll."""
+    return len([c for c in fake_client.created[0].calls if c[0] == "GetMenuCounters"])
 
 
 # --- night pause ------------------------------------------------------------

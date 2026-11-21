@@ -354,8 +354,7 @@ async def test_new_grade_and_new_test_events(
     board["exams"] = [*board["exams"], _exam(506, "2026-11-26", (1, 2), "מבחן", "שירה", subject="ספרות")]
     client.responses["EventsTestsBoard"] = {"status": True, "data": board}
 
-    freezer.tick(timedelta(minutes=31))
-    async_fire_time_changed(hass)
+    await config_entry.runtime_data.async_force_refresh()  # a full read, as the Refresh button does
     await hass.async_block_till_done(wait_background_tasks=True)
 
     assert sorted((e.data["student"], e.data["subject"], e.data["grade"]) for e in grade_events) == [
@@ -368,8 +367,7 @@ async def test_new_grade_and_new_test_events(
     ]
     assert hass.states.get("sensor.nv_m_lvy_latest_grade").state == "95"
 
-    freezer.tick(timedelta(minutes=31))
-    async_fire_time_changed(hass)
+    await config_entry.runtime_data.async_force_refresh()  # a full read, as the Refresh button does
     await hass.async_block_till_done(wait_background_tasks=True)
     assert len(grade_events) == 2 and len(test_events) == 1
 

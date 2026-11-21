@@ -25,7 +25,7 @@ from homeassistant.helpers.selector import (
 
 from webtop import WebtopLoginError
 
-from .auth import async_create_client, login_failure_reason
+from .auth import async_create_client, configured_user_agent, login_failure_reason
 from .const import (
     CONF_DATA,
     CONF_LESSON_TIMES,
@@ -34,10 +34,12 @@ from .const import (
     CONF_READ_UNREAD_MESSAGES,
     CONF_SCAN_INTERVAL,
     CONF_STUDENT_LESSON_TIMES,
+    CONF_USER_AGENT,
     CONF_USERNAME,
     DEFAULT_NIGHT_PAUSE,
     DEFAULT_READ_UNREAD_MESSAGES,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_USER_AGENT,
     DOMAIN,
     MAX_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
@@ -52,6 +54,7 @@ STEP_USER_SCHEMA = vol.Schema(
         vol.Required(CONF_USERNAME): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Required(CONF_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         vol.Optional(CONF_DATA): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(CONF_USER_AGENT): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
     }
 )
 
@@ -71,12 +74,20 @@ class AccountInfo:
         self.title = title
 
 
-async def validate_login(hass: HomeAssistant, data: Mapping[str, Any]) -> AccountInfo:
+async def validate_login(
+    hass: HomeAssistant, data: Mapping[str, Any], options: Mapping[str, Any] | None = None
+) -> AccountInfo:
     """Log in once with a throwaway client.
 
     Raises WebtopLoginError on failure; the caller sorts transient from auth.
     """
-    client = await async_create_client(hass, data[CONF_USERNAME], data[CONF_PASSWORD], data.get(CONF_DATA))
+    client = await async_create_client(
+        hass,
+        data[CONF_USERNAME],
+        data[CONF_PASSWORD],
+        data.get(CONF_DATA),
+        configured_user_agent(data, options),
+    )
     try:
         session = await client.login()
     finally:
@@ -112,6 +123,7 @@ class WebtopConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             user_input[CONF_USERNAME] = user_input[CONF_USERNAME].strip()
             user_input[CONF_DATA] = (user_input.get(CONF_DATA) or "").strip()
+            user_input[CONF_USER_AGENT] = (user_input.get(CONF_USER_AGENT) or "").strip()
             try:
                 info = await validate_login(self.hass, user_input)
             except Exception as err:
@@ -142,7 +154,7 @@ class WebtopConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             candidate = {**entry.data, **user_input, CONF_DATA: (user_input.get(CONF_DATA) or "").strip()}
             try:
-                info = await validate_login(self.hass, candidate)
+                info = await validate_login(self.hass, candidate, entry.options)
             except Exception as err:
                 errors["base"] = _error_key(err)
                 if errors["base"] == "unknown":
@@ -177,6 +189,8 @@ class WebtopOptionsFlow(OptionsFlowWithReload):
         options = self.config_entry.options
         if user_input is not None:
             user_input[CONF_LESSON_TIMES] = (user_input.get(CONF_LESSON_TIMES) or "").strip()
+            # Always stored, even empty, so that clearing the field really returns to the default.
+            user_input[CONF_USER_AGENT] = (user_input.get(CONF_USER_AGENT) or "").strip()
             try:
                 parse_manual_bell(user_input[CONF_LESSON_TIMES])
             except ValueError:
@@ -225,14 +239,24 @@ class WebtopOptionsFlow(OptionsFlowWithReload):
                 vol.Optional(CONF_LESSON_TIMES): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
                 ),
+                vol.Optional(CONF_USER_AGENT): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             }
         )
-        suggested = user_input or {CONF_LESSON_TIMES: options.get(CONF_LESSON_TIMES, "")}
+        suggested = user_input or {
+            CONF_LESSON_TIMES: options.get(CONF_LESSON_TIMES, ""),
+            # Shown only when it was changed; an empty field means the integration's own name.
+            CONF_USER_AGENT: self._custom_user_agent(),
+        }
         return self.async_show_form(
             step_id="init",
             data_schema=self.add_suggested_values_to_schema(schema, suggested),
             errors=errors,
         )
+
+    def _custom_user_agent(self) -> str:
+        """The client identification in effect, or "" when it is the default."""
+        current = configured_user_agent(self.config_entry.data, self.config_entry.options)
+        return "" if current == DEFAULT_USER_AGENT else current
 
     async def async_step_student(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Lesson times for one student; shown once per student."""

@@ -39,8 +39,14 @@ import httpx
 from webtop import WebtopClient, WebtopError, WebtopLoginError
 
 from custom_components.webtop import models
-from custom_components.webtop.auth import BASE_URL, compute_login_data
-from custom_components.webtop.const import MODULE_BEHAVIOUR, MODULE_GRADES, MODULE_TIMETABLE, MODULE_WEEK
+from custom_components.webtop.auth import BASE_URL, compute_login_data, is_firewall_block
+from custom_components.webtop.const import (
+    DEFAULT_USER_AGENT,
+    MODULE_BEHAVIOUR,
+    MODULE_GRADES,
+    MODULE_TIMETABLE,
+    MODULE_WEEK,
+)
 from tools.anonymizer import LocalLLM, anonymize_documents, discover_local_llm
 
 API = "/server/api/"
@@ -326,8 +332,9 @@ async def capture(args: argparse.Namespace, username: str, password: str, llm: L
     now = datetime.now().astimezone()
     today = now.strftime("%Y-%m-%d")
 
+    identity = {"User-Agent": DEFAULT_USER_AGENT}  # the tool says what it is, like the integration
     try:
-        counter = httpx.post(f"{BASE_URL}{API}user/getInput", json={}, timeout=20).json()
+        counter = httpx.post(f"{BASE_URL}{API}user/getInput", json={}, headers=identity, timeout=20).json()
     except Exception:
         counter = 0
     counter = counter if isinstance(counter, int) and not isinstance(counter, bool) else 0
@@ -343,9 +350,16 @@ async def capture(args: argparse.Namespace, username: str, password: str, llm: L
         timeout=30.0,
         auto_login=False,
     ) as client:
+        http = getattr(client, "_http", None)
+        if http is not None:
+            http.headers.update(identity)
         try:
             session = await client.login()
         except WebtopLoginError as err:
+            if is_firewall_block(err):
+                print("\nThe portal's firewall refused the connection (HTTP 403) before the portal saw the login.")
+                print("This is not a password problem: the portal is blocking this client or this network.")
+                return 3
             reason = re.search(r"errorDescription=('?[\w ]*'?)", str(err))
             print(f"\nLogin failed (login counter was {counter}).")
             print(f"Server said: {reason.group(1) if reason else 'no reason given / network error'}")

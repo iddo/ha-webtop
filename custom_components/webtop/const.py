@@ -19,9 +19,22 @@ DEFAULT_DATA = ""
 # stored. It is only valid for one username, so it is treated as "not set".
 LEGACY_DEFAULT_DATA = "+Aabe7FAdVluG6Lu+0ibrA=="
 
+# How the integration identifies itself to the portal (the HTTP User-Agent). By default it says
+# what it is. The user may set another value in the setup form or the options.
+CONF_USER_AGENT = "user_agent"
+INTEGRATION_VERSION = "0.8.0"
+DEFAULT_USER_AGENT = (
+    f"ha-webtop/{INTEGRATION_VERSION} (Home Assistant integration; +https://github.com/iddo/ha-webtop)"
+)
+# After the portal's firewall refuses a request, wait this long before the next attempt (seconds),
+# longer each time in a row. Hammering a firewall only makes a block last.
+BLOCKED_BACKOFF_SECONDS = (3600, 3 * 3600, 6 * 3600)
+
 # Options.
 CONF_SCAN_INTERVAL = "scan_interval"  # minutes
-DEFAULT_SCAN_INTERVAL = 30
+# An hour is enough: between polls the portal's own notifications decide what is re-read,
+# and the current lesson runs on a timer of its own.
+DEFAULT_SCAN_INTERVAL = 60
 MIN_SCAN_INTERVAL = 10
 # Lesson times typed by the user, for schools that do not publish them:
 # "08:00-08:45, 08:45-09:30, ..." in lesson order, or "1=08:00-08:45" per lesson.
@@ -48,6 +61,29 @@ NIGHT_PAUSE_END_HOUR = 6  # exclusive
 POLL_JITTER = 0.1
 # Last week's lessons change rarely (a teacher filling in late); re-read them this often.
 PREVIOUS_WEEK_REFRESH_HOURS = 3
+
+# How long each view is trusted before it is read again, in hours. Every poll reads only the
+# portal's notification list and unread badges (and today's changes); those cut these waits
+# short the moment they show something new. The Refresh button reads everything.
+VIEW_TTL_HOURS = {
+    "linked": 24,  # the logins linked to the account
+    "dashboard": 12,  # the children on a login and what the school allows
+    "board": 6,  # exams, events, vacations
+    "week": 2,  # this week's lessons, topics and homework
+    "behaviour": 3,
+    "grades": 6,
+    "inbox": 2,
+}
+# What a notification announces, by its module name (lower case). An unknown module
+# refreshes everything about that student.
+NOTIFICATION_VIEWS = {
+    "lessonsubjecthomework": ("week",),
+    "lessonevents": ("behaviour",),
+    "disciplineevents": ("behaviour",),
+    "pupilgrades": ("grades",),
+    "grades": ("grades",),
+}
+STUDENT_VIEWS = ("week", "behaviour", "grades")
 
 # Every pupil-card view has its own module id (the number in its URL on the portal), and a
 # school grants or blocks each one separately.

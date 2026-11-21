@@ -17,6 +17,7 @@ from custom_components.webtop.const import (
     CONF_READ_UNREAD_MESSAGES,
     CONF_SCAN_INTERVAL,
     CONF_STUDENT_LESSON_TIMES,
+    CONF_USER_AGENT,
     CONF_USERNAME,
     DOMAIN,
     LEGACY_DEFAULT_DATA,
@@ -211,6 +212,7 @@ async def test_options_flow_walks_each_student_and_reloads(hass: HomeAssistant, 
         CONF_NIGHT_PAUSE: True,
         CONF_READ_UNREAD_MESSAGES: False,  # off unless asked for: it marks messages as read on the portal
         CONF_LESSON_TIMES: "08:00-08:45, 08:45-09:30",
+        CONF_USER_AGENT: "",  # empty: the integration identifies as itself
         CONF_STUDENT_LESSON_TIMES: {KEY_B: "08:10-09:00"},
     }
     assert config_entry.runtime_data.update_interval.total_seconds() == 3600
@@ -256,5 +258,6 @@ async def test_options_flow_with_one_student_has_no_extra_step(hass: HomeAssista
         CONF_NIGHT_PAUSE: False,
         CONF_READ_UNREAD_MESSAGES: True,
         CONF_LESSON_TIMES: "",
+        CONF_USER_AGENT: "",
         CONF_STUDENT_LESSON_TIMES: {},
     }

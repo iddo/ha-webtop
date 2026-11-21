@@ -7,10 +7,12 @@
         "data": {
           "username": "Username",
           "password": "Password",
-          "data": "Login data override (advanced)"
+          "data": "Login data override (advanced)",
+          "user_agent": "Client identification (advanced)"
         },
         "data_description": {
-          "data": "Leave empty. The integration computes the 'Data' value of the login request from your username. Fill this in only to force a value captured from the browser."
+          "data": "Leave empty. The integration computes the 'Data' value of the login request from your username. Fill this in only to force a value captured from the browser.",
+          "user_agent": "The User-Agent the integration sends to the portal. Leave empty and it says what it is: the name of this integration, its version and its address."
         }
       },
       "reauth_confirm": {
@@ -24,6 +26,7 @@
     },
     "error": {
       "cannot_connect": "Could not reach the Webtop server. Check the connection and try again.",
+      "blocked": "The portal's firewall refused the connection (HTTP 403) before the portal saw the request. This is not a password problem: the portal is blocking this client or this network.",
       "invalid_auth": "Webtop rejected the login. Check the username and password by signing in at webtop.smartschool.co.il.",
       "captcha_required": "Webtop is asking for a captcha before it accepts a password login from this network. Sign in once in a browser, wait a while, then try again.",
       "too_many_attempts": "Webtop locked this account after too many failed attempts. Wait, or reset the password on the portal.",
@@ -43,13 +46,15 @@
           "scan_interval": "Polling interval",
           "night_pause": "Pause at night",
           "read_unread_messages": "Read unread messages",
-          "lesson_times": "Lesson times"
+          "lesson_times": "Lesson times",
+          "user_agent": "Client identification (advanced)"
         },
         "data_description": {
           "scan_interval": "Minutes between polls of the Webtop portal.",
           "lesson_times": "A default for students whose school publishes no lesson times. List them in lesson order, for example: 08:00-08:45, 08:45-09:30, 09:50-10:35. Prefix a lesson number to skip ahead: 0=07:15-08:00. With several students you are asked about each one next.",
           "night_pause": "Do not contact the portal between 23:00 and 06:00. The Refresh button still works.",
-          "read_unread_messages": "Off: the text of a message is fetched only after you have read it on the portal. On: unread messages are fetched too, so their text reaches Home Assistant right away. Fetching a message marks it as read on the portal, exactly as opening it does, so the portal's unread badge clears and the school may see it as read."
+          "read_unread_messages": "Off: the text of a message is fetched only after you have read it on the portal. On: unread messages are fetched too, so their text reaches Home Assistant right away. Fetching a message marks it as read on the portal, exactly as opening it does, so the portal's unread badge clears and the school may see it as read.",
+          "user_agent": "The User-Agent the integration sends to the portal. Leave empty and it says what it is: the name of this integration, its version and its address."
         }
       },
       "student": {

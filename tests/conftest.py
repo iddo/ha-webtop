@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -518,6 +519,8 @@ class FakeWebtopClient:
     login_count: int = 0
     closed: bool = False
     _session: WebtopSession | None = None
+    # Stands in for pywebtop's httpx client, which is where request headers live.
+    _http: Any = field(default_factory=lambda: SimpleNamespace(headers={}))
 
     # --- plumbing -------------------------------------------------------
     def _answer(self, name: str, default: Any, **kwargs: Any) -> Any:
@@ -617,6 +620,13 @@ def frozen_clock(freezer: FrozenDateTimeFactory) -> FrozenDateTimeFactory:
     """
     freezer.move_to("2026-11-10 20:00:00+00:00")
     return freezer
+
+
+@pytest.fixture(autouse=True)
+def half_hour_polls() -> Generator[None]:
+    """Poll every 30 minutes in tests unless a test sets an interval; the real default is an hour."""
+    with patch("custom_components.webtop.coordinator.DEFAULT_SCAN_INTERVAL", 30):
+        yield
 
 
 @pytest.fixture(autouse=True)

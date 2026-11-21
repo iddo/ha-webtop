@@ -212,7 +212,7 @@ async def test_relogin_failure_becomes_reauth(
 ) -> None:
     await _setup(hass, config_entry)
     client = fake_client.created[0]
-    client.responses["get_students"] = unauthorized
+    client.responses["GetMenuCounters"] = unauthorized  # the session is rejected on the next poll
     client.responses["login"] = WebtopLoginError("Login returned status=false")
 
     freezer.tick(timedelta(minutes=31))
@@ -224,24 +224,40 @@ async def test_relogin_failure_becomes_reauth(
     assert flows and flows[0]["context"]["source"] == "reauth"
 
 
-async def test_server_error_marks_unavailable_then_recovers(
-    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory
-) -> None:
+async def _read_everything(hass: HomeAssistant, config_entry) -> None:
+    """What the Refresh button does: read every view now, ignoring how fresh the copies in hand are."""
+    await config_entry.runtime_data.async_force_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
+async def test_server_error_marks_unavailable_then_recovers(hass: HomeAssistant, fake_client, config_entry) -> None:
     await _setup(hass, config_entry)
     client = fake_client.created[0]
     client.responses["get_messages_inbox"] = WebtopRequestError("POST /x failed (500): oops")
 
-    freezer.tick(timedelta(minutes=31))
-    async_fire_time_changed(hass)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _read_everything(hass, config_entry)
     assert _state(hass, "sensor.webtop_dnh_lvy_unread_messages").state == "unavailable"
     assert len(fake_client.created) == 1  # a 500 is not a session problem
 
     client.responses.pop("get_messages_inbox")
+    await _read_everything(hass, config_entry)
+    assert _state(hass, "sensor.webtop_dnh_lvy_unread_messages").state == "1"
+
+
+async def test_a_failing_quick_poll_keeps_the_last_data(
+    hass: HomeAssistant, fake_client, config_entry, freezer: FrozenDateTimeFactory
+) -> None:
+    """Between full reads a poll only checks what changed; a hiccup there is not an outage."""
+    await _setup(hass, config_entry)
+    client = fake_client.created[0]
+    client.responses["GetMenuCounters"] = WebtopRequestError("POST /x failed (500): oops")
+    client.responses["get_preview_unread_notifications"] = WebtopRequestError("POST /x failed (500): oops")
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert _state(hass, "sensor.webtop_dnh_lvy_unread_messages").state == "1"
+    assert _state(hass, "sensor.nv_m_lvy_homework_today").state == "1"
+    assert _state(hass, "sensor.nv_m_lvy_latest_grade").state == "92"
+    assert _state(hass, "sensor.webtop_dnh_lvy_unread_notifications").state == "unknown"  # that one could not be read
 
 
 async def test_optional_endpoint_failure_keeps_other_data(hass: HomeAssistant, fake_client, config_entry) -> None:
@@ -578,6 +594,8 @@ async def test_new_student_gets_entities_without_reload(
     freezer.tick(timedelta(minutes=31))
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get("sensor.myh_lvy_homework_today") is None  # the list of children is read twice a day
+    await _read_everything(hass, config_entry)
     assert _state(hass, "sensor.myh_lvy_homework_today").state == "0"
 
 
@@ -605,9 +623,7 @@ async def test_events_fire_only_for_new_items_after_baseline(
         "status": True,
         "data": [{"subject": "חדש", "sendingDate": "2026-11-10T10:00:00", "hasRead": 0}, *INBOX["data"]],
     }
-    freezer.tick(timedelta(minutes=31))
-    async_fire_time_changed(hass)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _read_everything(hass, config_entry)
 
     # Student A already had two homework items in the baseline; B had none, so B gets all three.
     assert sorted((e.data["student"], e.data["subject"], e.data["date"]) for e in homework_events) == [
@@ -623,10 +639,8 @@ async def test_events_fire_only_for_new_items_after_baseline(
         ("נועם לוי", "ציון לשבח"),
     ]
 
-    # Nothing new on the next poll: no further events.
-    freezer.tick(timedelta(minutes=31))
-    async_fire_time_changed(hass)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    # Nothing new on the next read: no further events.
+    await _read_everything(hass, config_entry)
     assert (len(homework_events), len(message_events), len(behaviour_events)) == (4, 1, 2)
 
 

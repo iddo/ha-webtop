@@ -19,7 +19,7 @@ from custom_components.webtop.const import (
 from custom_components.webtop.diagnostics import async_get_config_entry_diagnostics
 from custom_components.webtop.models import Message, html_to_text, parse_message_body, parse_notifications
 
-from .conftest import ENCRYPTED_ID_A, INBOX, NOTIFICATIONS, _message_body
+from .conftest import ENCRYPTED_ID_A, INBOX, MENU_COUNTERS, NOTIFICATIONS, _message_body
 
 LAST = "sensor.webtop_dnh_lvy_last_message"
 UNREAD = "sensor.webtop_dnh_lvy_unread_messages"
@@ -39,6 +39,12 @@ async def _advance(hass: HomeAssistant, freezer: FrozenDateTimeFactory, minutes:
     freezer.tick(timedelta(minutes=minutes))
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
+
+
+def _set_unread_badge(fake_client, unread: int) -> None:
+    """Change the portal's unread-messages badge, the way a new or newly read message does."""
+    counters = {**MENU_COUNTERS["data"], "unreadMessages": unread}
+    fake_client.created[0].responses["GetMenuCounters"] = {"status": True, "data": counters}
 
 
 def _body_requests(fake_client) -> list[str]:
@@ -106,6 +112,7 @@ async def test_text_appears_once_the_message_has_been_read_on_the_portal(
     assert hass.states.get(LAST).attributes["body"] == ""
     read_now = [{**INBOX["data"][0], "hasRead": 1}, INBOX["data"][1]]
     fake_client.created[0].responses["get_messages_inbox"] = {"status": True, "data": read_now}
+    _set_unread_badge(fake_client, 0)  # reading it on the portal clears the badge, which is the cue
     await _advance(hass, freezer)
     assert hass.states.get(LAST).attributes["body"] == TRIP
     assert _body_requests(fake_client) == ["enc-message-2", "enc-message-1"]
@@ -194,6 +201,7 @@ async def test_new_message_event_carries_the_text_when_it_may_be_fetched(
            "student_L_name": "כהן", "hasRead": 0, "filesWereAttached": 0, "messageId": "enc-message-3"}  # fmt: skip
     client = fake_client.created[0]
     client.responses["get_messages_inbox"] = {"status": True, "data": [new, *INBOX["data"]]}
+    _set_unread_badge(fake_client, 2)
     client.responses["GetMessagesInboxData"] = lambda payload: (
         {"status": True, "data": {"messageData": {"messageContent": "<p>מחר אין שיעור ראשון.</p>"}}}
         if payload["MessageId"] == "enc-message-3"
@@ -212,6 +220,7 @@ async def test_new_message_event_has_no_text_by_default(
     await _setup(hass, config_entry)
     new = {"subject": "שינוי במערכת", "sendingDate": "2026-11-10T20:30:00", "hasRead": 0, "messageId": "enc-message-3"}
     fake_client.created[0].responses["get_messages_inbox"] = {"status": True, "data": [new, *INBOX["data"]]}
+    _set_unread_badge(fake_client, 2)
     await _advance(hass, freezer)
     assert [(e.data["subject"], e.data["body"]) for e in events] == [("שינוי במערכת", "")]
     assert "enc-message-3" not in _body_requests(fake_client)  # still unread, so untouched
